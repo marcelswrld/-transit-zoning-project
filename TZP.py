@@ -231,6 +231,7 @@ def bus_stops_peak_hours(feed, mode = maximal):
     if not mode:  # minimal mode
         print("Using minimal mode")
         # Get bus routes
+        # @MARCEL - these lines are repeated in both maximal and minimal mode. Move above the if statement?
         bus_routes = feed.routes[feed.routes['route_type'] == 3]
         bus_trips = feed.trips[feed.trips['prefixed_route_id'].isin(bus_routes['prefixed_route_id'])]
         
@@ -273,7 +274,8 @@ def bus_stops_peak_hours(feed, mode = maximal):
             bus_trips[['prefixed_trip_id', 'prefixed_route_id']], 
             on='prefixed_trip_id'
         )
-        
+        # @marcel don't we need to do this separately for AM and PM, and make sure that a qualifying stop has at least one hour in BOTH periods?
+
         # Convert to datetime for rolling hour windows
         stop_times['time'] = pd.to_datetime(stop_times['arrival_time'], unit='s')
         
@@ -285,6 +287,7 @@ def bus_stops_peak_hours(feed, mode = maximal):
             for start_time in times:
                 end_time = start_time + pd.Timedelta(hours=1)
                 count = sum((times >= start_time) & (times < end_time))
+                print(count)
                 if count >= 3:
                     qualifying_stops.add(stop_id)
                     break
@@ -330,6 +333,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode = maximal):
 
     # Join route information to stops
     print("Joining route information...")
+    # @marcel need to use prefixed version of these columns...stop_ids are only unique within agency, I believe
     stop_route_data = (
         bus_peak_gdf.merge(feed.stop_times[['stop_id', 'trip_id']], on='stop_id')
         .merge(feed.trips[['trip_id', 'route_id']], on='trip_id')
@@ -339,7 +343,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode = maximal):
     print(f"Route information joined. Processing {len(stop_route_data)} stop-route combinations")
 
     # Create spatial index
-    spatial_index = stop_route_data.sindex
+    spatial_index = stop_route_data.sindex  # @marcel - may not be necessary. See suggestion below
     intersecting_stops = set()
     
     # Process in chunks to show progress
@@ -347,14 +351,27 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode = maximal):
     for i, (idx, stop_a) in enumerate(stop_route_data.iterrows()):
         if i % 1000 == 0:
             print(f"Processing stop {i}/{total} ({(i/total)*100:.1f}%)")
-            
+
+        # @marcel - alternative to the code below. Confirm whether it is faster and gets identical results?
+        # get stops within range
+        possible_matches = stop_route_data[stop_route_data.geometry.dwithin(stop_a.geometry, distance_threshold)]
+        # exclude stops where the stop ID OR the route name is the same
+        # @marcel - should we use prefixed route name?
+        possible_matches = possible_matches[(possible_matches.prefixed_stop_id!=stop_a.prefixed_stop_id) & (possible_matches.route_short_name!=stop_a.route_short_name)]
+        if len(possible_matches)>0:
+            intersecting_stops.update([stop_a['prefixed_stop_id']])
+            intersecting_stops.update(possible_matches['prefixed_stop_id'].unique())
+
+
         # Find potential matches
         possible_matches = list(spatial_index.intersection(stop_a.geometry.buffer(distance_threshold).bounds))
-        
+
+
         for match_idx in possible_matches:
             stop_b = stop_route_data.iloc[match_idx]
             
             # Skip same stop or same route
+            # @marcel - should we have a prefix for the route short name?
             if stop_a.name == stop_b.name or stop_a['route_short_name'] == stop_b['route_short_name']:
                 continue
 
@@ -364,6 +381,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode = maximal):
                 intersecting_stops.update([stop_a['stop_id'], stop_b['stop_id']])
 
     print(f"Found {len(intersecting_stops)} intersecting stops")
+    # @marcel - maybe prefixed_stop_id? same in the function merge_transit_stops
     return bus_peak_gdf[bus_peak_gdf['stop_id'].isin(intersecting_stops)]
 
 
@@ -407,6 +425,7 @@ def merge_transit_stops(rail_ferry_brt, bus_intersections_gdf, mode=maximal,
     result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs="EPSG:4326")
     
     # Rename columns to ensure they work in shapefiles (max 10 chars)
+    # @marcel - use a GPKG to avoid this constraint
     if 'agency_name' in result.columns:
         result.rename(columns={'agency_name': 'agency_nm'}, inplace=True)
         # Ensure agency_nm is properly formatted for shapefiles
@@ -414,6 +433,7 @@ def merge_transit_stops(rail_ferry_brt, bus_intersections_gdf, mode=maximal,
     
     # Create output directory if it doesn't exist
     os.makedirs(output_path, exist_ok=True)
+    # @marcel - put maximal or minimal in the filename
     result.to_file(os.path.join(output_path, "file2.shp"), driver='ESRI Shapefile')
 
     return result
@@ -438,6 +458,8 @@ def buffer_transit_stops(high_quality_stops_gdf, buffer_distance_miles = 0.5,
         high_quality_stops_gdf = high_quality_stops_gdf.to_crs(epsg=32611)
 
     # Apply the buffer and set it as the active geometry
+    # @marcel - or skip the steps below and just do 
+    #      high_quality_stops_gdf.geometry = high_quality_stops_gdf.geometry.buffer(buffer_distance_meters)
     high_quality_stops_gdf['buffer'] = high_quality_stops_gdf.geometry.buffer(buffer_distance_meters)
     buffered_stops_gdf = high_quality_stops_gdf.set_geometry('buffer').copy()
 
@@ -446,6 +468,7 @@ def buffer_transit_stops(high_quality_stops_gdf, buffer_distance_miles = 0.5,
 
     # Save to file
     # Don't forget to comment out if not saving!
+    # marcel - save with maximal or minimal in filename?
     buffered_stops_gdf.to_file(f"{output_path}/file_buffer2.shp", driver='ESRI Shapefile')
 
     return buffered_stops_gdf
