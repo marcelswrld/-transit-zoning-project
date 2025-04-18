@@ -47,10 +47,10 @@ Replace these file paths with the ones you are using. Each file path should be a
 # ]
 
 gtfs_path_2024 = [
-    r"C:\Users\marce\Downloads\LAMetro_Oct2024-20250211T180746Z-001.zip",
-    r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
-    r"C:\Users\marce\Downloads\LADOT_Oct2024-20250211T180744Z-001.zip",
-    r"C:\Users\marce\Downloads\BBB_Oct2024-20250211T180731Z-001.zip"
+    r"C:\Users\Admin\Downloads\LAMetro_Oct2024-20250212T230843Z-001.zip",
+    r"C:\Users\Admin\Downloads\LAMetroRail_Oct2024-20250212T230850Z-001.zip",
+    r"C:\Users\Admin\Downloads\LADOT_Oct2024-20250212T230845Z-001.zip",
+    r"C:\Users\Admin\Downloads\BBB_Oct2024-20250212T230835Z-001.zip"
 ]
 """# Maximal/Minimal Toggle
 
@@ -96,13 +96,11 @@ def load_and_combine_gtfs(gtfs_paths):
         
         # Read agency data - simple approach
         agency = pd.DataFrame()
-        try:
-            agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
-            if 'agency_id' not in agency.columns:
-                agency['agency_id'] = '1'
-            agency['agency_id'] = agency['agency_id'].astype(str)
-        except:
-            agency = pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
+        
+        if 'agency_id' in routes.columns:
+            routes['agency_id'] = routes['agency_id'].astype(str)
+        else:
+            routes['agency_id'] = '1'  # Assign the default value if column doesn't exist
         
         # Read frequencies if available
         frequencies = pd.DataFrame()
