@@ -47,10 +47,10 @@ Replace these file paths with the ones you are using. Each file path should be a
 # ]
 
 gtfs_path_2024 = [
-    r"C:\Users\Admin\Downloads\LAMetro_Oct2024-20250212T230843Z-001.zip",
-    r"C:\Users\Admin\Downloads\LAMetroRail_Oct2024-20250212T230850Z-001.zip",
-    r"C:\Users\Admin\Downloads\LADOT_Oct2024-20250212T230845Z-001.zip",
-    r"C:\Users\Admin\Downloads\BBB_Oct2024-20250212T230835Z-001.zip"
+    r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
+    r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
+    r"C:\Users\marce\Downloads\LADOT_Oct2024-20250211T180744Z-001.zip",
+    r"C:\Users\marce\Downloads\BBB_Oct2024-20250211T180731Z-001.zip"
 ]
 """# Maximal/Minimal Toggle
 
@@ -94,14 +94,17 @@ def load_and_combine_gtfs(gtfs_paths):
         stop_times = feed.stop_times.copy()
         stops = feed.stops.copy()
         
-        # Read agency data - simple approach
-        agency = pd.DataFrame()
-        
+            # Read agency data - simple approach
+        try:
+            agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
+        except:
+            agency = pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
+                
         if 'agency_id' in routes.columns:
             routes['agency_id'] = routes['agency_id'].astype(str)
         else:
             routes['agency_id'] = '1'  # Assign the default value if column doesn't exist
-        
+            
         # Read frequencies if available
         frequencies = pd.DataFrame()
         try:
@@ -247,8 +250,7 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         am_start = pd.to_datetime('1970-01-01 06:00:00')
         am_end = pd.to_datetime('1970-01-01 09:00:00')
         pm_start = pd.to_datetime('1970-01-01 15:00:00')
-        pm_end = pd.to_datetime('1970-01-01 19:00:00')
-        
+        pm_end = pd.to_datetime('1970-01-01 23:59:59')        
         # Filter for AM and PM peak hours
         am_peak = stop_times[(stop_times['time'] >= am_start) & (stop_times['time'] < am_end)]
         pm_peak = stop_times[(stop_times['time'] >= pm_start) & (stop_times['time'] < pm_end)]
@@ -268,7 +270,7 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         am_start = pd.to_datetime('1970-01-01 00:00:00')
         am_end = pd.to_datetime('1970-01-01 12:00:00')
         pm_start = pd.to_datetime('1970-01-01 12:00:00')
-        pm_end = pd.to_datetime('1970-01-01 24:00:00')
+        pm_end = pd.to_datetime('1970-01-01 23:59:59')
         
         # Filter for AM and PM periods
         am_peak = stop_times[(stop_times['time'] >= am_start) & (stop_times['time'] < am_end)]
@@ -589,7 +591,7 @@ def run_transit_zoning_pipeline(gtfs_paths, output_base_path):
 
 if __name__ == "__main__":
     # Output path
-    output_path = r"C:\Users\Admin\Documents\Transit Zoning Project\Transit Zoning Project Output"
+    output_path = r"C:\Users\marce\OneDrive\Documents\UCLA ITS\Transit Zoning Project\Transit Job Output"
     
     # Since your GTFS paths are already defined at the top of the file (gtfs_path_2024), 
     # we can use that variable directly
