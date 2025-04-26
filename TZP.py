@@ -365,6 +365,11 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
 
     assert bus_peak_gdf.index.name == 'prefixed_stop_id'
     
+    # plain English route names
+    routenames = feed.routes[['prefixed_route_id','agency_name','route_short_name']].set_index('prefixed_route_id')
+    routenames['agency_route'] = routenames.agency_name + ' ' + routenames.route_short_name
+    routenames = routenames['agency_route'].to_dict()
+
     # @marcel - can we talk about why this stop_to_routes is necessary?
     # first, if you want to create a dictionary to look up stops to routes, it's much simpler
     # something like this (the first line is join, the second is convert to dict)
@@ -427,8 +432,6 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
         # do unique stops first (to avoid duplicating the spatial join), and then expand to all stops
         nearby_stop_ids = unique_stops[unique_stops.geometry.distance(stop1.geometry) <= distance_threshold].index
         nearby = bus_peak_gdf.loc[nearby_stop_ids]
-
-        # to discuss - do we want to allow for intersections with other routes at the same stop? I think we do for maximal
         nearby = nearby[nearby.index != stop_id1]  # Exclude self
         
         # @marcel - I'm trying to understand the logic below
@@ -436,22 +439,28 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
         routes_at_nearby_stops = set(bus_peak_gdf.loc[nearby.index, 'prefixed_route_id'])
         
         all_routes = routes_at_stop1.union(routes_at_nearby_stops)
+        # add plain English names (not ids)
+        all_routes_english = [routenames[rr] for rr in all_routes]
+        
         if mode=='maximal':
             # if the stop and nearby stops have >1 route, it qualifies!
             if len(all_routes) > 1:
                 intersecting_stops.add(stop_id1)
-                intersecting_stop_routes[stop_id1] = list(all_routes)
+                intersecting_stop_routes[stop_id1] = all_routes_english
         else:
             # exclude routes that stop at the same stop
             # this is only a partial implementation of parallel stops
+            # it also won't exclude routes from different agencies that stop at the same stop
             if len(routes_at_nearby_stops.difference(routes_at_stop1)) > 0:
                 intersecting_stops.add(stop_id1)
-                intersecting_stop_routes[stop_id1] = list(all_routes)
+                intersecting_stop_routes[stop_id1] = all_routes_english
 
-        # we now have a set of qualifying stops, and a dictionary of each route that stops at or near that qualifying stops
-        result = unique_stops.loc[list(intersecting_stops)][['geometry']]
-        result = result.join(pd.Series(intersecting_stop_routes).to_frame('prefixed_route_ids')) 
+    # we now have a set of qualifying stops, and a dictionary of each route that stops at or near that qualifying stops
+    result = unique_stops.loc[list(intersecting_stops)][['geometry']]
+    result = result.join(pd.Series(intersecting_stop_routes).to_frame('prefixed_route_ids')) 
 
+    if 0: # probably remove this?
+        pass
         # @marcel - then, I think we can delete all of the commented out code
         # The one part I wasn't sure of was the part that uses direction_id
         # are there examples of where a route has a different prefixed_route_id but the same name? 
