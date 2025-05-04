@@ -243,6 +243,7 @@ def bus_stops_peak_hours(feed, mode='maximal'):
     # Convert arrival times to datetime - let errors occur naturally as supervisor suggested
     # Use pd.to_datetime with proper format handling
     stop_times['time'] = pd.to_datetime(stop_times['arrival_time'], unit='s')
+    assert stop_times['arrival_time'].max()<24*60*60  # make sure within the 24 hr interval
     
     # Define peak periods based on mode
     if mode == 'minimal':
