@@ -48,7 +48,7 @@ Replace these file paths with the ones you are using. Each file path should be a
 #    r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
 #    r"C:\Users\marce\Downloads\LADOT_Oct2024-20250211T180744Z-001.zip",
 #    r"C:\Users\marce\Downloads\BBB_Oct2024-20250211T180731Z-001.zip"
-]
+#]
 
 # specific the directory where all the zipped GFTS feeds exist
 if os.path.exists(r"C:\Users\marce\Downloads"):
@@ -73,12 +73,12 @@ class GTFSFeed:
 def load_and_combine_gtfs(gtfs_base_path):
     """Step 1
     Loads multiple GTFS files and combines them into a single object."""
-    combined_routes = pd.DataFrame()
-    combined_trips = pd.DataFrame()
-    combined_stop_times = pd.DataFrame()
-    combined_stops = pd.DataFrame()
-    combined_agency = pd.DataFrame()
-    combined_frequencies = pd.DataFrame()
+    combined_routes = {}
+    combined_trips = {}
+    combined_stop_times = {}
+    combined_stops = {}
+    combined_agency = {}
+    combined_frequencies = {}
     gtfs_fns= [os.path.join(gtfs_base_path, ff) for ff in os.listdir(gtfs_base_path) if ff.endswith('.zip') ]
     print(f"Loading feeds from {len(gtfs_fns)} GTFS files")
 
@@ -96,14 +96,19 @@ def load_and_combine_gtfs(gtfs_base_path):
         
         # Read agency data - let errors occur naturally as supervisor suggested
         agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
-        assert len(agency) ==1 # if not, we need to adapt the code
+        
         
         if 'agency_id' in routes.columns:
+            routes = routes.merge(agency[['agency_id', 'agency_name']],
+                             on='agency_id', how='left')
             routes['agency_id'] = routes['agency_id'].astype(str)
         else:
+            assert len(agency) ==1 # if not, we need to adapt the code
             aid = agency.iloc[0]['agency_id']
             routes['agency_id'] = str(aid) if pd.notnull(aid) else '1'  # Assign the default value if column doesn't exist
-        
+            agencyname = agency.iloc[0]['agency_name']
+            routes['agency_name'] = agencyname if pd.notnull(agencyname) else prefix
+
         # Read frequencies if available - let errors occur naturally
         frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
         
@@ -126,24 +131,23 @@ def load_and_combine_gtfs(gtfs_base_path):
         if not frequencies.empty and 'trip_id' in frequencies.columns:
             frequencies['prefixed_trip_id'] = prefix + "_" + frequencies['trip_id'].astype(str)
         
-        # Merge agency info into routes with a simple one-liner
-        agencyname = agency.iloc[0]['agency_name']
-        routes['agency_name'] = agencyname if pd.notnull(agencyname) else prefix
-        # this way might be needed if we have more than one agency per feed
-        #routes = routes.merge(agency[['prefixed_agency_id', 'agency_name']], 
-        #                     on='prefixed_agency_id', how='left')
-        
-        # Combine data
-        combined_routes = pd.concat([combined_routes, routes], ignore_index=True)
-        combined_trips = pd.concat([combined_trips, trips], ignore_index=True)
-        combined_stop_times = pd.concat([combined_stop_times, stop_times], ignore_index=True)
-        combined_stops = pd.concat([combined_stops, stops], ignore_index=True)
-        combined_agency = pd.concat([combined_agency, agency], ignore_index=True)
+        combined_routes[fn] = routes
+        combined_trips[fn] = trips
+        combined_stop_times[fn] = stop_times
+        combined_stops[fn] = stops
+        combined_agency[fn] = agency
         if not frequencies.empty:
-            combined_frequencies = pd.concat([combined_frequencies, frequencies], ignore_index=True)
-
+            combined_frequencies[fn] = frequencies
+    
+    # Combine data
+    combined_routes = pd.concat(combined_routes.values(), ignore_index=True)
+    combined_trips = pd.concat(combined_trips.values(), ignore_index=True)
+    combined_stop_times = pd.concat(combined_stop_times.values(), ignore_index=True)
+    combined_stops = pd.concat(combined_stops.values(), ignore_index=True)
+    combined_agency = pd.concat(combined_agency.values(), ignore_index=True)
     # Merge frequencies into trips if available
-    if not combined_frequencies.empty:
+    if len(combined_frequencies)>0:
+        combined_frequencies = pd.concat(combined_frequencies.values(), ignore_index=True)
         combined_trips = combined_trips.merge(
             combined_frequencies[['prefixed_trip_id', 'headway_secs']],
             on='prefixed_trip_id', how='left'
@@ -383,13 +387,19 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     intersecting_stops = set()
     intersecting_stop_routes = {}
     
+    # a spatial index with buffers 
+    sindex = unique_stops.sindex
+    sindex_map = unique_stops.reset_index()['prefixed_stop_id'].to_dict()
+
     # Process each stop
     for stop_id1, stop1 in unique_stops.iterrows():
         # Get all routes at this stop
         routes_at_stop1 = set(bus_peak_gdf.loc[[stop_id1], 'prefixed_route_id'])
         
         # Find all stops within threshold distance
-        nearby_stop_ids = unique_stops[unique_stops.geometry.distance(stop1.geometry) <= distance_threshold_meters].index
+        #nearby_stop_ids = unique_stops[unique_stops.geometry.dwithin(stop1.geometry, distance_threshold_meters)].index  # old version, without spatial index
+        nearby_stop_ids = sindex.query(stop1.geometry, predicate='dwithin', distance=distance_threshold_meters)
+        nearby_stop_ids = [sindex_map[xx] for xx in nearby_stop_ids]
         nearby = bus_peak_gdf.loc[nearby_stop_ids]
         
         # Exclude self
@@ -446,10 +456,11 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
     assert rail_ferry_brt_gdf.crs=='EPSG:4326'
     assert bus_stops_gdf.crs=='EPSG:4326'
     assert mode in ['maximal', 'minimal']
-    
+    assert bus_stops_gdf.prefixed_stop_id.is_unique
+
     # Assign qualification labels
     rail_ferry_brt_gdf['qualification'] = 'Rail, Ferry, BRT stop'
-    
+    rail_ferry_brt_gdf
     if bus_stops_gdf is None or bus_stops_gdf.empty:
         print("No qualifying bus stops found. Using only rail/ferry/BRT stops.")
         combined_gdf = rail_ferry_brt_gdf.copy()
@@ -458,7 +469,7 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
         combined_gdf = pd.concat([rail_ferry_brt_gdf, bus_stops_gdf])
     
     # Group by stop_id to handle duplicates - ensure index is stop_id if not already
-    # should not be needed!
+    # should not be needed! The only duplicates are rail/bus/BRT, if they are the same stop as a bus
     #agg_funcs = {
     #    'qualification': lambda x: '; '.join(set(x.dropna())),
     #    'geometry': 'first',
@@ -475,8 +486,6 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
 
     # Convert to GeoDataFrame # should be this already
     #result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
-
-    assert combined_gdf.prefixed_stop_id.is_unique
    
     # Convert to GeoDataFrame
     combined_gdf = gpd.GeoDataFrame(combined_gdf, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
