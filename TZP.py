@@ -150,6 +150,17 @@ def load_and_combine_gtfs(gtfs_paths):
             on='prefixed_trip_id', how='left'
         )
     
+    # generate stop id from geometry, in case different agencies stop at the same stop
+    combined_stops['consolidated_stop_id'] = combined_stops.groupby(['stop_lat','stop_lon']).ngroup()
+    stops_multiagency = combined_stops.groupby('consolidated_stop_id').size()
+    stops_multiagency = n_multiagency[n_multiagency>1]
+    print('{} stops found that are used by >1 agency'.format(len(stops_multiagency)))
+
+    # now overwrite the prefixed_stop_id to use this consolidated_stop_id
+    stop_lookup = combined_stops.set_index('prefixed_stop_id').consolidated_stop_id.to_dict()
+    combined_stops.prefixed_stop_id =  combined_stops.consolidated_stop_id
+    combined_stop_times.prefixed_stop_id = combined_stop_times.prefixed_stop_id.map(stop_lookup)
+
     return GTFSFeed(
         routes=combined_routes,
         trips=combined_trips,
@@ -283,29 +294,51 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         # Check for rolling hour windows with 3+ trips
         qualifying_stops_am = set()
         qualifying_stops_pm = set()
-        
-        # Process AM peak
-        for stop_route, group in am_peak.groupby(['prefixed_stop_id', 'prefixed_route_id']):
-            times = sorted(group['time'])
-            for i, start_time in enumerate(times):
-                end_time = start_time + pd.Timedelta(hours=1)
-                count = sum((pd.Series(times) >= start_time) & (pd.Series(times) < end_time))
-                if count >= 3:
-                    qualifying_stops_am.add(stop_route)  # Add stop_id and route_id
-                    break
-        
-        # Process PM peak
-        for stop_route, group in pm_peak.groupby(['prefixed_stop_id', 'prefixed_route_id']):
-            times = sorted(group['time'])
-            for i, start_time in enumerate(times):
-                end_time = start_time + pd.Timedelta(hours=1)
-                count = sum((pd.Series(times) >= start_time) & (pd.Series(times) < end_time))
-                if count >= 3:
-                    qualifying_stops_pm.add(stop_route)  # Add stop_id and route_id
-                    break
+
+        non_qualifying_routes_am = [] # we will see if these can be combined at any point to form other routes
+        non_qualifying_routes_pm = []
+
+        qualifying_stops_all = []        
+
+        for period_start, period_end in ([am_start, pm_start], [am_end, pm_end]):
+            # subset of trips for am or pm 
+            peak = stop_times[(stop_times['time'] >= period_start) & (stop_times['time'] < period_end)]
+            qualifying_stops = set()
+            infrequent_stop_routes = []
+
+            for stop_route, group in peak.groupby(['prefixed_stop_id', 'prefixed_route_id']):
+                times = sorted(group['time'])
+                for i, start_time in enumerate(times):
+                    end_time = start_time + pd.Timedelta(hours=1)
+                    count = sum((pd.Series(times) >= start_time) & (pd.Series(times) < end_time))
+                    if count >= 3:
+                        qualifying_stops.add(stop_route)  # Add stop_id and route_id
+                        break
+                else:  # only executed if the inner for loop does not break
+                    infrequent_stop_routes.append(group)            
+
+            # Can we combine any of these infrequent (non-qualifying) routes?
+            infrequent_stop_routes = pd.concat(infrequent_stop_routes)
+            for stop_id, group in infrequent_stop_routes.groupby('prefixed_stop_id'):
+                times = sorted(group['time'])
+                max_newroutes = 0
+                for i, start_time in enumerate(times):
+                    end_time = start_time + pd.Timedelta(hours=1)
+                    count = sum((pd.Series(times) >= start_time) & (pd.Series(times) < end_time))
+                    n_routes = len(np.unique(group.loc[(group['time'] >= start_time) & (group['time'] < end_time), 'prefixed_route_id']))
+                    if n_routes>=4 and count>=6:
+                        max_newroutes = 2  # there could be more, but it's a major stop if there are at least 2
+                    elif n_routes>=2 and count>=3:
+                        max_newroutes = max(1, max_newroutes)
+                if max_newroutes>0:
+                    qualifying_stops.add((stop_id, 'Consolidated Routes'))
+                if max_newroutes>1:
+                    qualifying_stops.add((stop_id, 'Consolidated Routes 2'))
+
+            qualifying_stops_all.append(qualifying_stops) # save the AM results before we do PM in the next iteration of the loop
         
         # A stop must qualify during both AM and PM periods
-        qualifying_stops = pd.DataFrame(qualifying_stops_am.intersection(qualifying_stops_pm), columns=['prefixed_stop_id', 'prefixed_route_id']).set_index('prefixed_stop_id')
+        qualifying_stops = pd.DataFrame(qualifying_stops_all[0].intersection(qualifying_stops_all[1]), columns=['prefixed_stop_id', 'prefixed_route_id']).set_index('prefixed_stop_id')
 
     # Get stop details for qualifying stops
     bus_peak_stops = qualifying_stops.join(feed.stops.set_index('prefixed_stop_id')[['stop_lon','stop_lat']])
@@ -358,7 +391,8 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     # Set distance threshold based on mode
     # @marcel - but the projection you use (32611) is in meters. either use a feet-based projection or change these values
     # I think it was correct earlier - what was the reason for this change?
-    distance_threshold = 150 if mode == 'minimal' else 500  # feet
+    ft_to_m = 0.3048
+    distance_threshold = 150*ft_to_m if mode == 'minimal' else 500*ft_to_m  
     
     # Ensure CRS is consistent
     bus_peak_gdf = bus_peak_gdf.to_crs(epsg=32611)  # Project to UTM for accurate distances
@@ -369,6 +403,8 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     routenames = feed.routes[['prefixed_route_id','agency_name','route_short_name']].set_index('prefixed_route_id')
     routenames['agency_route'] = routenames.agency_name + ' ' + routenames.route_short_name
     routenames = routenames['agency_route'].to_dict()
+    # some routenames are consolidated lower-frequency routes
+    routenames.update({'Consolidated Routes':'Consolidated Routes', 'Consolidated Routes 2':'Consolidated Routes 2'})
 
     # @marcel - can we talk about why this stop_to_routes is necessary?
     # first, if you want to create a dictionary to look up stops to routes, it's much simpler
@@ -519,7 +555,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     #result['qualification'] = f'Bus stop with intersection within {distance_threshold} feet'
     
     print(f"Found {len(result)} qualifying bus stops with intersections")
-    return result
+    return result.reset_index()
 
 """# Step #5: Merge datasets
 
@@ -548,25 +584,30 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
         combined_gdf = pd.concat([rail_ferry_brt_gdf, bus_stops_gdf])
     
     # Group by stop_id to handle duplicates
-    agg_funcs = {
-        'qualification': lambda x: '; '.join(set(x.dropna())),
-        'geometry': 'first',
-        'stop_lat': 'first',
-        'stop_lon': 'first',
-        'stop_name': 'first',
-        'agency_name': lambda x: '; '.join(set(x.dropna().astype(str)))
-    }
-    
-    all_stops_aggregated = combined_gdf.groupby('prefixed_stop_id').agg(agg_funcs).reset_index()
-    
-    # Convert to GeoDataFrame
-    result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
-    
+    # should not be needed!
+    #agg_funcs = {
+    #    'qualification': lambda x: '; '.join(set(x.dropna())),
+    #    'geometry': 'first',
+    #    'stop_lat': 'first',
+    #    'stop_lon': 'first',
+    #    'stop_name': 'first',
+    #    'agency_name': lambda x: '; '.join(set(x.dropna().astype(str)))
+    #}
+    #all_stops_aggregated = combined_gdf.groupby('prefixed_stop_id').agg(agg_funcs).reset_index()
+
+    # Convert to GeoDataFrame # should be this already
+    #result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
+
+    assert combined_gdf.prefixed_stop_id.is_unique
+    result = combined_gdf[['qualification','prefixed_stop_id','prefixed_route_ids','geometry']]
+
+
     # Rename columns for shapefile compatibility if needed
     result.rename(columns={
         'prefixed_stop_id': 'stop_id',
         'qualification': 'qualify',
-        'agency_name': 'agency'
+        'agency_name': 'agency',
+        'prefixed_route_ids':'route_ids'
     }, inplace=True)
     
     # Create output directory if it doesn't exist
@@ -621,38 +662,27 @@ def run_transit_zoning_pipeline(gtfs_paths, output_base_path):
     
     # Process maximal definition
     print("Processing maximal definition")
-    rail_ferry_brt_max = rail_ferry_brt(feed, mode='maximal')
-    bus_peaks_max = bus_stops_peak_hours(feed, mode='maximal')
-    bus_intersections_max = identify_bus_stop_intersections(feed, bus_peaks_max, mode='maximal')
-    merged_max = merge_transit_stops(rail_ferry_brt_max, bus_intersections_max, mode='maximal', output_path=output_path_max)
-    buffered_max = buffer_transit_stops(merged_max, mode='maximal', output_path=output_path_max)
-    
-    # Process minimal definition
-    print("Processing minimal definition")
-    rail_ferry_brt_min = rail_ferry_brt(feed, mode='minimal')
-    bus_peaks_min = bus_stops_peak_hours(feed, mode='minimal')
-    bus_intersections_min = identify_bus_stop_intersections(feed, bus_peaks_min, mode='minimal')
-    merged_min = merge_transit_stops(rail_ferry_brt_min, bus_intersections_min, mode='minimal', output_path=output_path_min)
-    buffered_min = buffer_transit_stops(merged_min, mode='minimal', output_path=output_path_min)
-    
+    result = {}
+
+    for mode, output_path in zip(['minimal','maximal'], ['output_path_min','output_path_max']):
+        rail_ferry_brt_stops = rail_ferry_brt(feed, mode=mode)
+        bus_peaks = bus_stops_peak_hours(feed, mode=mode)
+        bus_intersections = identify_bus_stop_intersections(feed, bus_peaks, mode=mode)
+        merged = merge_transit_stops(rail_ferry_brt_stops, bus_intersections, mode=mode, output_path=output_path)
+        buffered = buffer_transit_stops(merged, mode=mode, output_path=output_path)
+        result[mode] = {
+            'rail_ferry_brt': rail_ferry_brt_stops.copy(),
+            'bus_peaks': bus_peaks.copy(),
+            'bus_intersections': bus_intersections.copy(),
+            'merged': merged.copy(),
+            'buffered': buffered.copy()
+        }
+
+
+
     print("Transit Zoning Pipeline completed successfully")
     
-    return {
-        'minimal': {
-            'rail_ferry_brt': rail_ferry_brt_min,
-            'bus_peaks': bus_peaks_min,
-            'bus_intersections': bus_intersections_min,
-            'merged': merged_min,
-            'buffered': buffered_min
-        },
-        'maximal': {
-            'rail_ferry_brt': rail_ferry_brt_max,
-            'bus_peaks': bus_peaks_max,
-            'bus_intersections': bus_intersections_max,
-            'merged': merged_max,
-            'buffered': buffered_max
-        }
-    }
+    return result
 
 if __name__ == "__main__":
     # Output path
