@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 
 # Place file paths here
 
-Replace these file paths with the ones you are using. Each file path should be a zipped or unzipped GTFS file.
+Replace these file paths with the ones you are using. Each file path should be a zipped GTFS file.
 """
 # Replace the file paths with your actual GTFS data
 # gtfs_path_2024 = [
@@ -60,18 +60,6 @@ elif os.path.exists('/Users/adammb/Desktop/GTFS/'):
 else:
     raise Exception('paths not found')
 
-"""# Maximal/Minimal Toggle
-
-If "maximal" is set to True, the maximal interpretation will be automatically applied throughout the notebook. If it is set to False, the minimal interpretation will be applied.
-"""
-
-maximal = True  # or 'maximal' when you want to switch modes
-
-"""# Step #1: Loading GTFS
-
-This step takes multiple GTFS files and combines them into one dataset.
-"""
-
 class GTFSFeed:
     """A custom GTFS object for handling concatenated GTFS tables."""
     def __init__(self, routes, trips, stop_times, stops, agency, frequencies=None):
@@ -83,7 +71,8 @@ class GTFSFeed:
         self.frequencies = frequencies if frequencies is not None else pd.DataFrame()
 
 def load_and_combine_gtfs(gtfs_base_path):
-    """Loads multiple GTFS files and combines them into a single object."""
+    """Step 1
+    Loads multiple GTFS files and combines them into a single object."""
     combined_routes = pd.DataFrame()
     combined_trips = pd.DataFrame()
     combined_stop_times = pd.DataFrame()
@@ -183,15 +172,14 @@ def load_and_combine_gtfs(gtfs_base_path):
         frequencies=combined_frequencies
     )
 
-"""# Step #2: Rail, ferry, BRT stops
-
-This step identifies transit stops that serve rail, light rail, subway, ferry, or some BRT routes. These routes-except for BRT-have their own designation
-in GTFS files and all count for HQ transit stops. BRT routes are selected by name.
-"""
-
 def rail_ferry_brt(feed, mode='maximal'):
-    """Identifies rail, ferry, and BRT stops from GTFS data."""
+    """Step 2
+    Identifies rail, ferry, and BRT stops from GTFS data.
+    This step identifies transit stops that serve rail, light rail, subway, ferry, or some BRT routes. These routes-except for BRT-have their own designation
+    in GTFS files and all count for HQ transit stops. BRT routes are selected by name.
+    """
     # Define route types based on mode
+    assert mode in ['maximal', 'minimal']
     if mode == 'minimal':
         rail_route_types = [0, 1, 5, 7]  # Tram, Subway, Cable Car, Funicular
     else:
@@ -224,15 +212,21 @@ def rail_ferry_brt(feed, mode='maximal'):
     print(f"Extracted {len(rail_ferry_brt_gdf)} rail, ferry, and BRT stops")
     return rail_ferry_brt_gdf
 
-"""# Step #3: Bus stops with peak hours
-
-This step identifies bus stops with frequent service during peak hours (morning and afternoon). In the maximal definition, a stop qualifies
-if it has, from one route, at least one hour-long period with 3 arrivals throughout the morning and afternoon peak hours. This hour-long period need not start at the beginning of an hour; for example, it could stretch from 7:30-8:30AM. In the minimal definition, a stop qualifies if it has, from one route, at least 9 buses arriving during the morning peak AND 12 buses in the afternoon peak. The morning peak is 6-9AM and the afternoon peak is 3-7PM.
-"""
-
 def bus_stops_peak_hours(feed, mode='maximal'):
-    """Identifies bus stops with frequent service during peak hours."""
+    """Step 3
+    
+    Identifies bus stops with frequent service during peak hours (morning and afternoon). 
+    
+    In the maximal definition, a stop qualifies if it has, from one route, at least one hour-long period with 3 arrivals throughout the morning and afternoon peak hours. 
+    This hour-long period need not start at the beginning of an hour; for example, it could stretch from 7:30-8:30AM. 
+    
+    In the minimal definition, a stop qualifies if it has, from one route, at least 9 buses arriving during the morning peak AND 12 buses in the afternoon peak. 
+
+    The morning peak is 6-9AM and the afternoon peak is 3-7PM.
+    """
+    
     # Only select bus routes
+    assert mode in ['maximal', 'minimal']
     bus_routes = feed.routes[feed.routes['route_type'] == 3]  # Bus route_type = 3
     bus_trips = feed.trips[feed.trips['prefixed_route_id'].isin(bus_routes['prefixed_route_id'])]
     
@@ -341,18 +335,20 @@ def bus_stops_peak_hours(feed, mode='maximal'):
     print(f"Identified {len(bus_peak_gdf)} high-frequency bus stops")
     return bus_peak_gdf
 
+def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
+    """Step 4
 
-"""# Step #4: Bus stop intersections
+    This step finds bus stops that are near each other (within 150 or 500 feet) but serve different bus routes. This prevents stops on the same route
+    from intersecting, which Cal-ITP believed was against the intent of the law.
 
-This step finds bus stops that are near each other (within 150 or 500 feet) but serve different bus routes. This prevents stops on the same route
-from intersecting, which Cal-ITP believed was against the intent of the law.
-"""
-
-
-
-"""
-    Identifies intersecting bus stops based on a distance threshold, excluding stops on the same route.
+    For minimal definition:
+    - Only actual intersections between different routes count
+    - No combining parallel routes
     
+    For maximal definition:
+    - All stops along a route with any intersection count
+    - Routes along same road count as intersecting
+
     Parameters:
     - feed: GTFS feed containing routes, trips, and stop_times
     - bus_peak_gdf: GeoDataFrame with bus stops meeting peak hour criteria
@@ -361,19 +357,8 @@ from intersecting, which Cal-ITP believed was against the intent of the law.
     Returns:
     - GeoDataFrame with qualifying intersecting bus stops
     """
-def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
-    """
-    Identifies bus stops that qualify based on the intersection rules.
-    
-    For minimal definition:
-    - Only actual intersections between different routes count
-    - No combining parallel routes
-    
-    For maximal definition:
-    - All stops along a route with any intersection count
-    - Routes along same road count as intersecting
-    """
     print(f"Finding bus stop intersections in {mode} mode")
+    assert mode in ['maximal', 'minimal']
     
    # Set distance threshold based on mode and convert from feet to meters for UTM projection
     distance_threshold_feet = 150 if mode == 'minimal' else 500  # feet
@@ -448,15 +433,19 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     print(f"Found {len(result)} qualifying bus stops with intersections")
     return result.reset_index()
 
-"""# Step #5: Merge datasets
-
-This step combines the rail/ferry stops and high-quality bus stops (from steps 2 and 4) into one dataset. It then exports this dataset as a shapefile of the stops (without 1/2 mile buffers) to a designated file path.
-"""
 def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', output_path='output'):
-    """Merges rail/ferry/BRT stops with high-frequency bus stops."""
+    """Step #5
+    
+    Merge datasets
+
+    This step combines the rail/ferry/BRT stops and high-quality bus stops (from steps 2 and 4) into one dataset. 
+    It then exports this dataset as a shapefile of the stops (without 1/2 mile buffers) to a designated file path.
+    """
+
     # Ensure CRS is consistent
     assert rail_ferry_brt_gdf.crs=='EPSG:4326'
     assert bus_stops_gdf.crs=='EPSG:4326'
+    assert mode in ['maximal', 'minimal']
     
     # Assign qualification labels
     rail_ferry_brt_gdf['qualification'] = 'Rail, Ferry, BRT stop'
@@ -512,13 +501,13 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
     print(f"Saved merged stops to {output_path}")
     return combined_gdf
 
-"""# Step #6: Buffer transit stops
-
-This step creates a buffer zone (1/2 mile) around each of the transit stops. These are the high-quality transit areas resulting from
-the stops. This step exports the buffer zone to a designated file path.
-"""
 def buffer_transit_stops(high_quality_stops_gdf, buffer_distance_miles=0.5, mode='maximal', output_path='output'):
-    """Creates a buffer zone around transit stops."""
+    """Step 6
+    Creates a buffer around transit stops.
+    These are the high-quality transit areas resulting from the stops
+    """
+    assert mode in ['maximal', 'minimal']
+
     # Convert buffer distance to meters
     buffer_distance_meters = buffer_distance_miles * 1609.34
     
@@ -570,8 +559,6 @@ def run_transit_zoning_pipeline(gtfs_path, output_base_path):
             'merged': merged.copy(),
             'buffered': buffered.copy()
         }
-
-
 
     print("Transit Zoning Pipeline completed successfully")
     
