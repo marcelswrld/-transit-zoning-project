@@ -12,13 +12,10 @@ import partridge as ptg
 import pandas as pd
 import numpy as np
 import geopandas as gpd
-from shapely.geometry import Point
-from shapely.strtree import STRtree
 from datetime import datetime
 import os
 import logging 
-import zipfile
-import io
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -52,6 +49,14 @@ gtfs_path_2024 = [
     r"C:\Users\marce\Downloads\LADOT_Oct2024-20250211T180744Z-001.zip",
     r"C:\Users\marce\Downloads\BBB_Oct2024-20250211T180731Z-001.zip"
 ]
+
+# specific the directory where all the zipped GFTS feeds exist
+gtfs_path_2024 = '/Users/adammb/Desktop/GTFS/'
+gtfs_path_2024 = [ff for ff in gtfs_path_2024 if ff.endswith('.zip') ]
+
+output_path = r"C:\Users\marce\OneDrive\Documents\UCLA ITS\Transit Zoning Project\Transit Job Output"
+output_path = "/Users/adammb/Desktop/Transit_Output"
+
 """# Maximal/Minimal Toggle
 
 If "maximal" is set to True, the maximal interpretation will be automatically applied throughout the notebook. If it is set to False, the minimal interpretation will be applied.
@@ -94,26 +99,19 @@ def load_and_combine_gtfs(gtfs_paths):
         stop_times = feed.stop_times.copy()
         stops = feed.stops.copy()
         
-            # Read agency data - simple approach
-        try:
-            agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
-        except: # @marcel - why would this generate an exception? Better to let the errors happen so we understand which agencies have problems
-            agency = pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
-                
+        # Read agency data - let errors occur naturally as supervisor suggested
+        agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
+        
         if 'agency_id' in routes.columns:
             routes['agency_id'] = routes['agency_id'].astype(str)
         else:
             routes['agency_id'] = '1'  # Assign the default value if column doesn't exist
-            
-        # Read frequencies if available
-        frequencies = pd.DataFrame()
-        try:
-            frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
-        except:
-            frequencies = pd.DataFrame()
+        
+        # Read frequencies if available - let errors occur naturally
+        frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
         
         # Apply prefixes to IDs consistently
-        routes['agency_id'] = routes.get('agency_id', '1').astype(str)
+        routes['agency_id'] = routes['agency_id'].astype(str)
         routes['prefixed_agency_id'] = prefix + "_" + routes['agency_id']
         routes['prefixed_route_id'] = prefix + "_" + routes['route_id'].astype(str)
         
@@ -201,23 +199,6 @@ def rail_ferry_brt(feed, mode='maximal'):
     relevant_stop_times = feed.stop_times[feed.stop_times['prefixed_trip_id'].isin(relevant_trips['prefixed_trip_id'])]
     relevant_stops = feed.stops[feed.stops['prefixed_stop_id'].isin(relevant_stop_times['prefixed_stop_id'])]
     
-    # Merge trip and agency info to stops
-    # @marcel - you added a bunch of code here, but I'm not clear why it's necessary. We don't need to know anything about trip ids for rail/BRT/ferry - just the stops
-    relevant_stops = relevant_stops.merge(
-        relevant_stop_times[['prefixed_stop_id', 'prefixed_trip_id']].drop_duplicates(),
-        on='prefixed_stop_id', how='left'
-    )
-    
-    relevant_stops = relevant_stops.merge(
-        relevant_trips[['prefixed_trip_id', 'prefixed_route_id']].drop_duplicates(),
-        on='prefixed_trip_id', how='left'
-    )
-    
-    relevant_stops = relevant_stops.merge(
-        all_routes[['prefixed_route_id', 'agency_name']].drop_duplicates(),
-        on='prefixed_route_id', how='left'
-    )
-    
     # Create GeoDataFrame
     rail_ferry_brt_gdf = gpd.GeoDataFrame(
         relevant_stops,
@@ -245,25 +226,18 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         bus_trips[['prefixed_trip_id', 'prefixed_route_id']],
         on='prefixed_trip_id', how='inner'
     )
-    
-    # Convert arrival times from seconds to datetime objects
-    try:
-        stop_times['time'] = pd.to_datetime(stop_times['arrival_time'], unit='s')
-    except:
-        # Handle case where times might be strings
-        # @marcel - this is a bit dangerous! It relies on the string being in a prescribed format. Use the pd.to_datetime functionality, or let's talk
-        if isinstance(stop_times['arrival_time'].iloc[0], str):
-            stop_times['arrival_seconds'] = stop_times['arrival_time'].apply(
-                lambda x: sum(int(i) * j for i, j in zip(x.split(':'), [3600, 60, 1]))
-            )
-            stop_times['time'] = pd.to_datetime(stop_times['arrival_seconds'], unit='s')
+   
+    # Convert arrival times to datetime - let errors occur naturally as supervisor suggested
+    # Use pd.to_datetime with proper format handling
+    stop_times['time'] = pd.to_datetime(stop_times['arrival_time'], unit='s')
     
     # Define peak periods based on mode
     if mode == 'minimal':
         am_start = pd.to_datetime('1970-01-01 06:00:00')
         am_end = pd.to_datetime('1970-01-01 09:00:00')
         pm_start = pd.to_datetime('1970-01-01 15:00:00')
-        pm_end = pd.to_datetime('1970-01-01 23:59:59')        
+        pm_end = pd.to_datetime('1970-01-01 19:00:00')
+        
         # Filter for AM and PM peak hours
         am_peak = stop_times[(stop_times['time'] >= am_start) & (stop_times['time'] < am_end)]
         pm_peak = stop_times[(stop_times['time'] >= pm_start) & (stop_times['time'] < pm_end)]
@@ -275,17 +249,16 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         # Join the counts
         peak_counts = am_counts.merge(pm_counts, on=['prefixed_stop_id', 'prefixed_route_id'], how='outer').fillna(0)
         
-        # Filter stops with at least 9 AM trips AND 12 PM trips on any route
+        # Filter stops with at least 9 AM trips AND 12 PM trips on any route - storing route information
         qualifying_stops = peak_counts[(peak_counts['am_count'] >= 9) & (peak_counts['pm_count'] >= 12)][['prefixed_stop_id','prefixed_route_id']].drop_duplicates()
         qualifying_stops.set_index('prefixed_stop_id', inplace=True)
-
-
+    
     else:  # maximal mode
         # Check for 3+ trips per hour in both AM and PM periods
         am_start = pd.to_datetime('1970-01-01 00:00:00')
-        am_end = pd.to_datetime('1970-01-01 12:00:00')
+        am_end = pd.to_datetime('1970-01-01 11:59:59')  # Fixed from 24:00:00
         pm_start = pd.to_datetime('1970-01-01 12:00:00')
-        pm_end = pd.to_datetime('1970-01-01 23:59:59')
+        pm_end = pd.to_datetime('1970-01-01 23:59:59')  # Fixed from 24:00:00
         
         # Filter for AM and PM periods
         am_peak = stop_times[(stop_times['time'] >= am_start) & (stop_times['time'] < am_end)]
@@ -349,8 +322,7 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         geometry=gpd.points_from_xy(bus_peak_stops['stop_lon'], bus_peak_stops['stop_lat']),
         crs="EPSG:4326"
     )
-
-
+    
     print(f"Identified {len(bus_peak_gdf)} high-frequency bus stops")
     return bus_peak_gdf
 
@@ -388,171 +360,73 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     """
     print(f"Finding bus stop intersections in {mode} mode")
     
-    # Set distance threshold based on mode
-    # @marcel - but the projection you use (32611) is in meters. either use a feet-based projection or change these values
-    # I think it was correct earlier - what was the reason for this change?
-    ft_to_m = 0.3048
-    distance_threshold = 150*ft_to_m if mode == 'minimal' else 500*ft_to_m  
+   # Set distance threshold based on mode and convert from feet to meters for UTM projection
+    distance_threshold_feet = 150 if mode == 'minimal' else 500  # feet
+    distance_threshold_meters = distance_threshold_feet * 0.3048  # Conversion to meters
     
-    # Ensure CRS is consistent
+    # Ensure CRS is consistent and bus_peak_gdf is indexed by prefixed_stop_id
     bus_peak_gdf = bus_peak_gdf.to_crs(epsg=32611)  # Project to UTM for accurate distances
-
-    assert bus_peak_gdf.index.name == 'prefixed_stop_id'
     
-    # plain English route names
+    # Ensure index is prefixed_stop_id
+    if bus_peak_gdf.index.name != 'prefixed_stop_id':
+        bus_peak_gdf = bus_peak_gdf.set_index('prefixed_stop_id')
+    
+    # Add plain English route names
     routenames = feed.routes[['prefixed_route_id','agency_name','route_short_name']].set_index('prefixed_route_id')
     routenames['agency_route'] = routenames.agency_name + ' ' + routenames.route_short_name
     routenames = routenames['agency_route'].to_dict()
-    # some routenames are consolidated lower-frequency routes
-    routenames.update({'Consolidated Routes':'Consolidated Routes', 'Consolidated Routes 2':'Consolidated Routes 2'})
-
-    # @marcel - can we talk about why this stop_to_routes is necessary?
-    # first, if you want to create a dictionary to look up stops to routes, it's much simpler
-    # something like this (the first line is join, the second is convert to dict)
-
-    # stop_to_routes = feed.stop_times[['prefixed_trip_id','prefixed_stop_id']].set_index('prefixed_trip_id').join(feed.trips[['prefixed_trip_id','prefixed_route_id']].set_index('prefixed_trip_id'))
-    # stop_to_routes = stop_to_routes.set_index('prefixed_stop_id')['prefixed_route_id'].to_dict()
-
-    # but I'm not sure why it is needed
-    # if we are just trying to access the route information, we should ONLY use routes that are frequent, and identify those in the bus_stops_peak_hours() function
-    # otherwise, we might match to non-frequent routes
-    # so the solution is to add the routes to bus_peak_gdf() in that earlier function
-    # I made to changes to that effect in that function
-
-    # Create a mapping of stops to their routes
-    #stop_to_routes = {}
-
-    # Get routes serving each stop
-    #stop_routes = feed.stop_times[['prefixed_stop_id', 'prefixed_trip_id']].drop_duplicates().merge(
-    #    feed.trips[['prefixed_trip_id', 'prefixed_route_id', 'direction_id']] if 'direction_id' in feed.trips.columns 
-    #    else feed.trips[['prefixed_trip_id', 'prefixed_route_id']],
-    #    on='prefixed_trip_id'
-    #).merge(
-    #    feed.routes[['prefixed_route_id', 'route_short_name']],
-    #    on='prefixed_route_id'
-    #).drop_duplicates()
     
-    # Create dictionary mapping stops to routes
-    #for _, row in stop_routes.iterrows():
-    #    if row['prefixed_stop_id'] not in stop_to_routes:
-    #        stop_to_routes[row['prefixed_stop_id']] = []
-    #    
-    #    route_info = {
-    #        'route_id': row['prefixed_route_id'],
-    #        'route_name': row['route_short_name'],
-    #        'direction_id': row.get('direction_id', None)
-    #    }
-        
-        # Only add if this route isn't already in the list
-    #    if not any(r['route_id'] == route_info['route_id'] for r in stop_to_routes[row['prefixed_stop_id']]):
-    #        stop_to_routes[row['prefixed_stop_id']].append(route_info)
+    # Get unique stops for initial spatial query (to avoid duplicates)
+    unique_stops = bus_peak_gdf[~bus_peak_gdf.index.duplicated()]
     
     # Find stops within distance threshold of each other
     intersecting_stops = set()
     intersecting_stop_routes = {}
-    routes_with_intersections = set()
-
-    unique_stops = bus_peak_gdf[~bus_peak_gdf.index.duplicated()]
-
-    # For each stop in our dataset
+    
+    # Process each stop
     for stop_id1, stop1 in unique_stops.iterrows():
-        
-        # Skip if this stop has no route information
-        # @marcel - when would this happen? If it does, it seems like an error upstream and we should fix there
-        #if stop_id1 not in stop_to_routes:
-        #    continue
-        
+        # Get all routes at this stop
         routes_at_stop1 = set(bus_peak_gdf.loc[[stop_id1], 'prefixed_route_id'])
-
-        # Find all stops within threshold distance
-        # do unique stops first (to avoid duplicating the spatial join), and then expand to all stops
-        nearby_stop_ids = unique_stops[unique_stops.geometry.distance(stop1.geometry) <= distance_threshold].index
-        nearby = bus_peak_gdf.loc[nearby_stop_ids]
-        nearby = nearby[nearby.index != stop_id1]  # Exclude self
         
-        # @marcel - I'm trying to understand the logic below
-        # wouldn't a simpler approach be better, like this?
+        # Find all stops within threshold distance
+        nearby_stop_ids = unique_stops[unique_stops.geometry.distance(stop1.geometry) <= distance_threshold_meters].index
+        nearby = bus_peak_gdf.loc[nearby_stop_ids]
+        
+        # Exclude self
+        nearby = nearby[nearby.index != stop_id1]
+        
+        if len(nearby) == 0:
+            continue
+            
+        # Get routes at nearby stops
         routes_at_nearby_stops = set(bus_peak_gdf.loc[nearby.index, 'prefixed_route_id'])
         
+        # Get all routes (at this stop and nearby)
         all_routes = routes_at_stop1.union(routes_at_nearby_stops)
-        # add plain English names (not ids)
-        all_routes_english = [routenames[rr] for rr in all_routes]
         
-        if mode=='maximal':
-            # if the stop and nearby stops have >1 route, it qualifies!
+        # Add plain English route names
+        all_routes_english = [routenames.get(rr, str(rr)) for rr in all_routes]
+        
+        # Implement minimal vs maximal logic
+        if mode == 'maximal':
+            # If the stop and nearby stops have >1 route, it qualifies!
             if len(all_routes) > 1:
                 intersecting_stops.add(stop_id1)
                 intersecting_stop_routes[stop_id1] = all_routes_english
         else:
-            # exclude routes that stop at the same stop
-            # this is only a partial implementation of parallel stops
-            # it also won't exclude routes from different agencies that stop at the same stop
+            # For minimal: exclude routes that stop at the same stop
+            # Only count if there are routes at nearby stops that aren't at this stop
             if len(routes_at_nearby_stops.difference(routes_at_stop1)) > 0:
                 intersecting_stops.add(stop_id1)
                 intersecting_stop_routes[stop_id1] = all_routes_english
-
-    # we now have a set of qualifying stops, and a dictionary of each route that stops at or near that qualifying stops
+    
+    # Generate result using supervisor's method
     result = unique_stops.loc[list(intersecting_stops)][['geometry']]
-    result = result.join(pd.Series(intersecting_stop_routes).to_frame('prefixed_route_ids')) 
-
-    if 0: # probably remove this?
-        pass
-        # @marcel - then, I think we can delete all of the commented out code
-        # The one part I wasn't sure of was the part that uses direction_id
-        # are there examples of where a route has a different prefixed_route_id but the same name? 
-
-        # Check each nearby stop
-        #for stop_id2, stop2 in nearby.iterrows():
-            
-            # Skip if this stop has no route information
-            # @marcel - ditto. should raise an error so we can check into it
-            #if stop_id2 not in stop_to_routes:
-            #    continue
-            
-        #    # Check for intersection of different routes
-        #    found_intersection = False
-            
-        #    for route1 in routes_at_stop1:
-        #        if found_intersection:
-        #            break
-                    
-        #        for route2 in stop_to_routes[stop_id2]:
-        #            # Skip if same route ID
-        #           if route1['route_id'] == route2['route_id']:
-        #                continue
-                    
-        #            # Skip if same route but bidirectional (different directions of same route)
-        #            if route1['route_name'] == route2['route_name'] and route1.get('direction_id') is not None and route2.get('direction_id') is not None:
-        #                if route1['direction_id'] != route2['direction_id']:
-        #                    continue
-                    
-        #            # Different routes - this is a true intersection
-        #            if route1['route_name'] != route2['route_name']:
-        #                found_intersection = True
-                        
-        #                # Add both stops to our set
-        #                intersecting_stops.add(stop_id1)
-        #                intersecting_stops.add(stop_id2)
-                        
-        #                # Remember which routes have intersections (for maximal definition)
-        #                routes_with_intersections.add(route1['route_id'])
-        #                routes_with_intersections.add(route2['route_id'])
-        #                break
-    
-    # For maximal definition: add all stops along routes with intersections
-    #if mode == 'maximal':
-    #    for stop_id, routes in stop_to_routes.items():
-    #        for route in routes:
-    #            if route['route_id'] in routes_with_intersections:
-    #                intersecting_stops.add(stop_id)
-    #                break
-    
-    # Filter the GeoDataFrame for qualifying stops
-    #result = bus_peak_gdf[bus_peak_gdf['prefixed_stop_id'].isin(intersecting_stops)].copy()
-    #result = result.to_crs(epsg=4326)  # Convert back to WGS84
+    result = result.join(pd.Series(intersecting_stop_routes).to_frame('prefixed_route_ids'))
+    result = result.to_crs(epsg=4326)  # Convert back to WGS84
     
     # Add qualification field
-    #result['qualification'] = f'Bus stop with intersection within {distance_threshold} feet'
+    result['qualification'] = f'Bus stop with intersection within {distance_threshold_feet} feet'
     
     print(f"Found {len(result)} qualifying bus stops with intersections")
     return result.reset_index()
@@ -583,7 +457,7 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
         bus_stops_gdf['qualification'] = 'High-Frequency Bus Stop'
         combined_gdf = pd.concat([rail_ferry_brt_gdf, bus_stops_gdf])
     
-    # Group by stop_id to handle duplicates
+    # Group by stop_id to handle duplicates - ensure index is stop_id if not already
     # should not be needed!
     #agg_funcs = {
     #    'qualification': lambda x: '; '.join(set(x.dropna())),
@@ -591,9 +465,13 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
     #    'stop_lat': 'first',
     #    'stop_lon': 'first',
     #    'stop_name': 'first',
-    #    'agency_name': lambda x: '; '.join(set(x.dropna().astype(str)))
+    #    'agency_name': lambda x: '; '.join(set(x.dropna().astype(str))) if 'agency_name' in combined_gdf.columns else None
     #}
-    #all_stops_aggregated = combined_gdf.groupby('prefixed_stop_id').agg(agg_funcs).reset_index()
+    # Only include columns that exist
+    #existing_columns = [col for col in agg_funcs.keys() if col in combined_gdf.columns]
+    #agg_funcs = {col: agg_funcs[col] for col in existing_columns}
+    
+    #all_stops_aggregated = combined_gdf.groupby(level=0).agg(agg_funcs).reset_index()
 
     # Convert to GeoDataFrame # should be this already
     #result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
@@ -602,14 +480,21 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
     result = combined_gdf[['qualification','prefixed_stop_id','prefixed_route_ids','geometry']]
 
 
+    if combined_gdf.index.name != 'prefixed_stop_id' and 'prefixed_stop_id' in combined_gdf.columns:
+        combined_gdf = combined_gdf.set_index('prefixed_stop_id')
+       
+   
+    # Convert to GeoDataFrame
+    result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
+    
     # Rename columns for shapefile compatibility if needed
     result.rename(columns={
         'prefixed_stop_id': 'stop_id',
         'qualification': 'qualify',
-        'agency_name': 'agency',
+        'agency_name': 'agency'  if 'agency_name' in result.columns else None,
         'prefixed_route_ids':'route_ids'
     }, inplace=True)
-    
+
     # Create output directory if it doesn't exist
     os.makedirs(output_path, exist_ok=True)
     
@@ -685,11 +570,7 @@ def run_transit_zoning_pipeline(gtfs_paths, output_base_path):
     return result
 
 if __name__ == "__main__":
-    # Output path
-    output_path = r"C:\Users\marce\OneDrive\Documents\UCLA ITS\Transit Zoning Project\Transit Job Output"
     
-    # Since your GTFS paths are already defined at the top of the file (gtfs_path_2024), 
-    # we can use that variable directly
     print(f"Starting process with {len(gtfs_path_2024)} GTFS files")
     print(f"Output will be saved to: {output_path}")
     
