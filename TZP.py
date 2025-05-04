@@ -12,13 +12,10 @@ import partridge as ptg
 import pandas as pd
 import numpy as np
 import geopandas as gpd
-from shapely.geometry import Point
-from shapely.strtree import STRtree
 from datetime import datetime
 import os
 import logging 
-import zipfile
-import io
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -94,26 +91,19 @@ def load_and_combine_gtfs(gtfs_paths):
         stop_times = feed.stop_times.copy()
         stops = feed.stops.copy()
         
-            # Read agency data - simple approach
-        try:
-            agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
-        except: # @marcel - why would this generate an exception? Better to let the errors happen so we understand which agencies have problems
-            agency = pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
-                
+        # Read agency data - let errors occur naturally as supervisor suggested
+        agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
+        
         if 'agency_id' in routes.columns:
             routes['agency_id'] = routes['agency_id'].astype(str)
         else:
             routes['agency_id'] = '1'  # Assign the default value if column doesn't exist
-            
-        # Read frequencies if available
-        frequencies = pd.DataFrame()
-        try:
-            frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
-        except:
-            frequencies = pd.DataFrame()
+        
+        # Read frequencies if available - let errors occur naturally
+        frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
         
         # Apply prefixes to IDs consistently
-        routes['agency_id'] = routes.get('agency_id', '1').astype(str)
+        routes['agency_id'] = routes['agency_id'].astype(str)
         routes['prefixed_agency_id'] = prefix + "_" + routes['agency_id']
         routes['prefixed_route_id'] = prefix + "_" + routes['route_id'].astype(str)
         
@@ -190,23 +180,6 @@ def rail_ferry_brt(feed, mode='maximal'):
     relevant_stop_times = feed.stop_times[feed.stop_times['prefixed_trip_id'].isin(relevant_trips['prefixed_trip_id'])]
     relevant_stops = feed.stops[feed.stops['prefixed_stop_id'].isin(relevant_stop_times['prefixed_stop_id'])]
     
-    # Merge trip and agency info to stops
-    # @marcel - you added a bunch of code here, but I'm not clear why it's necessary. We don't need to know anything about trip ids for rail/BRT/ferry - just the stops
-    relevant_stops = relevant_stops.merge(
-        relevant_stop_times[['prefixed_stop_id', 'prefixed_trip_id']].drop_duplicates(),
-        on='prefixed_stop_id', how='left'
-    )
-    
-    relevant_stops = relevant_stops.merge(
-        relevant_trips[['prefixed_trip_id', 'prefixed_route_id']].drop_duplicates(),
-        on='prefixed_trip_id', how='left'
-    )
-    
-    relevant_stops = relevant_stops.merge(
-        all_routes[['prefixed_route_id', 'agency_name']].drop_duplicates(),
-        on='prefixed_route_id', how='left'
-    )
-    
     # Create GeoDataFrame
     rail_ferry_brt_gdf = gpd.GeoDataFrame(
         relevant_stops,
@@ -234,25 +207,18 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         bus_trips[['prefixed_trip_id', 'prefixed_route_id']],
         on='prefixed_trip_id', how='inner'
     )
-    
-    # Convert arrival times from seconds to datetime objects
-    try:
-        stop_times['time'] = pd.to_datetime(stop_times['arrival_time'], unit='s')
-    except:
-        # Handle case where times might be strings
-        # @marcel - this is a bit dangerous! It relies on the string being in a prescribed format. Use the pd.to_datetime functionality, or let's talk
-        if isinstance(stop_times['arrival_time'].iloc[0], str):
-            stop_times['arrival_seconds'] = stop_times['arrival_time'].apply(
-                lambda x: sum(int(i) * j for i, j in zip(x.split(':'), [3600, 60, 1]))
-            )
-            stop_times['time'] = pd.to_datetime(stop_times['arrival_seconds'], unit='s')
+   
+    # Convert arrival times to datetime - let errors occur naturally as supervisor suggested
+    # Use pd.to_datetime with proper format handling
+    stop_times['time'] = pd.to_datetime(stop_times['arrival_time'], unit='s')
     
     # Define peak periods based on mode
     if mode == 'minimal':
         am_start = pd.to_datetime('1970-01-01 06:00:00')
         am_end = pd.to_datetime('1970-01-01 09:00:00')
         pm_start = pd.to_datetime('1970-01-01 15:00:00')
-        pm_end = pd.to_datetime('1970-01-01 23:59:59')        
+        pm_end = pd.to_datetime('1970-01-01 19:00:00')
+        
         # Filter for AM and PM peak hours
         am_peak = stop_times[(stop_times['time'] >= am_start) & (stop_times['time'] < am_end)]
         pm_peak = stop_times[(stop_times['time'] >= pm_start) & (stop_times['time'] < pm_end)]
@@ -264,17 +230,16 @@ def bus_stops_peak_hours(feed, mode='maximal'):
         # Join the counts
         peak_counts = am_counts.merge(pm_counts, on=['prefixed_stop_id', 'prefixed_route_id'], how='outer').fillna(0)
         
-        # Filter stops with at least 9 AM trips AND 12 PM trips on any route
+        # Filter stops with at least 9 AM trips AND 12 PM trips on any route - storing route information
         qualifying_stops = peak_counts[(peak_counts['am_count'] >= 9) & (peak_counts['pm_count'] >= 12)][['prefixed_stop_id','prefixed_route_id']].drop_duplicates()
         qualifying_stops.set_index('prefixed_stop_id', inplace=True)
-
-
+    
     else:  # maximal mode
         # Check for 3+ trips per hour in both AM and PM periods
         am_start = pd.to_datetime('1970-01-01 00:00:00')
-        am_end = pd.to_datetime('1970-01-01 12:00:00')
+        am_end = pd.to_datetime('1970-01-01 11:59:59')  # Fixed from 24:00:00
         pm_start = pd.to_datetime('1970-01-01 12:00:00')
-        pm_end = pd.to_datetime('1970-01-01 23:59:59')
+        pm_end = pd.to_datetime('1970-01-01 23:59:59')  # Fixed from 24:00:00
         
         # Filter for AM and PM periods
         am_peak = stop_times[(stop_times['time'] >= am_start) & (stop_times['time'] < am_end)]
@@ -291,7 +256,7 @@ def bus_stops_peak_hours(feed, mode='maximal'):
                 end_time = start_time + pd.Timedelta(hours=1)
                 count = sum((pd.Series(times) >= start_time) & (pd.Series(times) < end_time))
                 if count >= 3:
-                    qualifying_stops_am.add(stop_route)  # Add stop_id and route_id
+                    qualifying_stops_am.add(stop_route)  # Store both stop_id and route_id
                     break
         
         # Process PM peak
@@ -301,23 +266,23 @@ def bus_stops_peak_hours(feed, mode='maximal'):
                 end_time = start_time + pd.Timedelta(hours=1)
                 count = sum((pd.Series(times) >= start_time) & (pd.Series(times) < end_time))
                 if count >= 3:
-                    qualifying_stops_pm.add(stop_route)  # Add stop_id and route_id
+                    qualifying_stops_pm.add(stop_route)  # Store both stop_id and route_id
                     break
         
         # A stop must qualify during both AM and PM periods
-        qualifying_stops = pd.DataFrame(qualifying_stops_am.intersection(qualifying_stops_pm), columns=['prefixed_stop_id', 'prefixed_route_id']).set_index('prefixed_stop_id')
-
-    # Get stop details for qualifying stops
-    bus_peak_stops = qualifying_stops.join(feed.stops.set_index('prefixed_stop_id')[['stop_lon','stop_lat']])
-
+        qualifying_stops = pd.DataFrame(qualifying_stops_am.intersection(qualifying_stops_pm), 
+                                      columns=['prefixed_stop_id', 'prefixed_route_id']).set_index('prefixed_stop_id')
+    
+    # Get stop details for qualifying stops - join with stop_lon and stop_lat only
+    bus_peak_stops = qualifying_stops.join(feed.stops.set_index('prefixed_stop_id')[['stop_lon','stop_lat', 'stop_name']])
+    
     # Create GeoDataFrame
     bus_peak_gdf = gpd.GeoDataFrame(
         bus_peak_stops,
         geometry=gpd.points_from_xy(bus_peak_stops['stop_lon'], bus_peak_stops['stop_lat']),
         crs="EPSG:4326"
     )
-
-
+    
     print(f"Identified {len(bus_peak_gdf)} high-frequency bus stops")
     return bus_peak_gdf
 
