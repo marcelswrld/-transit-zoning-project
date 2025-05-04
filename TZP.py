@@ -418,17 +418,25 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
         bus_stops_gdf['qualification'] = 'High-Frequency Bus Stop'
         combined_gdf = pd.concat([rail_ferry_brt_gdf, bus_stops_gdf])
     
-    # Group by stop_id to handle duplicates
+    # Group by stop_id to handle duplicates - ensure index is stop_id if not already
+    if combined_gdf.index.name != 'prefixed_stop_id' and 'prefixed_stop_id' in combined_gdf.columns:
+        combined_gdf = combined_gdf.set_index('prefixed_stop_id')
+    
+    # Aggregate using pandas operations
     agg_funcs = {
         'qualification': lambda x: '; '.join(set(x.dropna())),
         'geometry': 'first',
         'stop_lat': 'first',
         'stop_lon': 'first',
         'stop_name': 'first',
-        'agency_name': lambda x: '; '.join(set(x.dropna().astype(str)))
+        'agency_name': lambda x: '; '.join(set(x.dropna().astype(str))) if 'agency_name' in combined_gdf.columns else None
     }
     
-    all_stops_aggregated = combined_gdf.groupby('prefixed_stop_id').agg(agg_funcs).reset_index()
+    # Only include columns that exist
+    existing_columns = [col for col in agg_funcs.keys() if col in combined_gdf.columns]
+    agg_funcs = {col: agg_funcs[col] for col in existing_columns}
+    
+    all_stops_aggregated = combined_gdf.groupby(level=0).agg(agg_funcs).reset_index()
     
     # Convert to GeoDataFrame
     result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
@@ -437,9 +445,9 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
     result.rename(columns={
         'prefixed_stop_id': 'stop_id',
         'qualification': 'qualify',
-        'agency_name': 'agency'
+        'agency_name': 'agency' if 'agency_name' in result.columns else None
     }, inplace=True)
-    
+
     # Create output directory if it doesn't exist
     os.makedirs(output_path, exist_ok=True)
     
@@ -529,8 +537,6 @@ if __name__ == "__main__":
     # Output path
     output_path = r"C:\Users\marce\OneDrive\Documents\UCLA ITS\Transit Zoning Project\Transit Job Output"
     
-    # Since your GTFS paths are already defined at the top of the file (gtfs_path_2024), 
-    # we can use that variable directly
     print(f"Starting process with {len(gtfs_path_2024)} GTFS files")
     print(f"Output will be saved to: {output_path}")
     
