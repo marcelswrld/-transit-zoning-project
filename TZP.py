@@ -184,10 +184,12 @@ def rail_ferry_brt(feed, mode='maximal'):
     """
     # Define route types based on mode
     assert mode in ['maximal', 'minimal']
-    if mode == 'minimal':
-        rail_route_types = [0, 1, 5, 7]  # Tram, Subway, Cable Car, Funicular
-    else:
-        rail_route_types = [0, 1, 2, 5, 7]  # Including Intercity Rail
+    rail_route_types = [0, 1, 2, 5, 7]  # Including Intercity Rail
+
+    """
+    TO DO: exclude Amtrak from minimal, and maybe other services that are coded as "2"
+
+    """
     
     ferry_route_type = 4  # Ferry
 
