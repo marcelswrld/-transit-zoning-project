@@ -94,22 +94,23 @@ def load_and_combine_gtfs(gtfs_base_path):
         stop_times = feed.stop_times.copy()
         stops = feed.stops.copy()
         
-        # Read agency data - let errors occur naturally as supervisor suggested
+        # Read agency data
         agency = feed.agency.copy() if hasattr(feed, 'agency') else pd.DataFrame({'agency_id': ['1'], 'agency_name': ['Unknown Agency']})
         
-        
+        # note: some agencies use the same agency_id (e.g. AC Transit and Culver City Bus)
+        # this is OK as their routes do not serve the same stop
+        # but let's confirm this when we have all the agencies TO DO
         if 'agency_id' in routes.columns:
             routes = routes.merge(agency[['agency_id', 'agency_name']],
                              on='agency_id', how='left')
             routes['agency_id'] = routes['agency_id'].astype(str)
         else:
-            assert len(agency) ==1 # if not, we need to adapt the code
-            aid = agency.iloc[0]['agency_id']
-            routes['agency_id'] = str(aid) if pd.notnull(aid) else '1'  # Assign the default value if column doesn't exist
+            assert len(agency) ==1 and pd.notnull(agency.iloc[0]['agency_id']) # if not, we need to adapt the code
+            routes['agency_id'] = str(agency.iloc[0]['agency_id']) 
             agencyname = agency.iloc[0]['agency_name']
             routes['agency_name'] = agencyname if pd.notnull(agencyname) else prefix
 
-        # Read frequencies if available - let errors occur naturally
+        # Read frequencies if available
         frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
         
         # Apply prefixes to IDs consistently
@@ -167,6 +168,9 @@ def load_and_combine_gtfs(gtfs_base_path):
     # create a route name - some agencies have this in short_name, some in long_name
     combined_routes['route_name'] = combined_routes.route_short_name.fillna(combined_routes.route_long_name).fillna(combined_routes.route_id)
 
+    print('Loaded the following routes:')
+    print(combined_routes.groupby(['agency_id','agency_name']).size())
+
     return GTFSFeed(
         routes=combined_routes,
         trips=combined_trips,
@@ -184,7 +188,7 @@ def rail_ferry_brt(feed, mode='maximal'):
     """
     # Define route types based on mode
     assert mode in ['maximal', 'minimal']
-    rail_route_types = [0, 1, 2, 5, 7]  # Including Intercity Rail
+    rail_route_types = [0, 1, 2, 5, 7, 12]  # Including Intercity Rail. Note we exclude 6 - Aerial lift, suspended cable car (e.g., gondola lift, aerial tramway).
 
     """
     TO DO: exclude Amtrak from minimal, and maybe other services that are coded as "2"
@@ -194,7 +198,7 @@ def rail_ferry_brt(feed, mode='maximal'):
     ferry_route_type = 4  # Ferry
 
     # Filter routes for rail and ferry
-    rail_ferry_routes = feed.routes[feed.routes['route_type'].isin(rail_route_types + [ferry_route_type])]
+    rail_ferry_routes = feed.routes[feed.routes['route_type'].astype(int).isin(rail_route_types + [ferry_route_type])]
     
     # Include specific BRT lines by route_long_name
     brt_lines = ["Metro G Line 901", "Metro J Line 910/950", "GEARY RAPID"]
@@ -233,7 +237,7 @@ def bus_stops_peak_hours(feed, mode='maximal'):
     
     # Only select bus routes
     assert mode in ['maximal', 'minimal']
-    bus_routes = feed.routes[feed.routes['route_type'] == 3]  # Bus route_type = 3
+    bus_routes = feed.routes[feed.routes['route_type'].astype(int).isin([3,11])]  # Bus route_type = 3. Trolleybus is 11
     bus_trips = feed.trips[feed.trips['prefixed_route_id'].isin(bus_routes['prefixed_route_id'])]
     
     # Enrich stop_times with route information
