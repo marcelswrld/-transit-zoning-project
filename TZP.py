@@ -188,8 +188,9 @@ def rail_ferry_brt(feed, mode='maximal'):
     """
     # Define route types based on mode
     assert mode in ['maximal', 'minimal']
-    rail_route_types = [0, 1, 2, 5, 7, 12]  # Including Intercity Rail. Note we exclude 6 - Aerial lift, suspended cable car (e.g., gondola lift, aerial tramway).
-
+    rail_route_types = [0, 1, 2, 7, 12]  # Including Intercity Rail. Note we exclude 6 - Aerial lift, suspended cable car (e.g., gondola lift, aerial tramway).
+    if mode=='maximal':
+        rail_route_types.append(5)  # cable car
     """
     TO DO: exclude Amtrak from minimal, and maybe other services that are coded as "2"
 
