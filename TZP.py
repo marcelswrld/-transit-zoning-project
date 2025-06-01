@@ -54,8 +54,9 @@ Replace these file paths with the ones you are using. Each file path should be a
 if os.path.exists(r"C:\Users\marce\Downloads"):
     gtfs_path = r"C:\Users\marce\Downloads"
     output_path = r"C:\Users\marce\OneDrive\Documents\UCLA ITS\Transit Zoning Project\Transit Job Output"
-elif os.path.exists('/Users/adammb/Desktop/GTFS/'):
-    gtfs_path = '/Users/adammb/Desktop/GTFS/' 
+elif os.path.exists('/Users/adammb/Desktop/transit_data/'):
+    base_path = '/Users/adammb/Desktop/transit_data/' 
+    gtfs_path = os.path.join(base_path, 'GTFS')
     output_path = "/Users/adammb/Desktop/Transit_Output"
 else:
     raise Exception('paths not found')
@@ -70,7 +71,7 @@ class GTFSFeed:
         self.agency = agency
         self.frequencies = frequencies if frequencies is not None else pd.DataFrame()
 
-def load_and_combine_gtfs(gtfs_base_path):
+def load_and_combine_gtfs(gtfs_path, year):
     """Step 1
     Loads multiple GTFS files and combines them into a single object."""
     combined_routes = {}
@@ -79,7 +80,9 @@ def load_and_combine_gtfs(gtfs_base_path):
     combined_stops = {}
     combined_agency = {}
     combined_frequencies = {}
-    gtfs_fns= [os.path.join(gtfs_base_path, ff) for ff in os.listdir(gtfs_base_path) if ff.endswith('.zip') ]
+
+    path = os.path.join(gtfs_path, year)
+    gtfs_fns= [os.path.join(path, ff) for ff in os.listdir(path) if ff.endswith('.zip') ]
     print(f"Loading feeds from {len(gtfs_fns)} GTFS files")
 
 
@@ -168,7 +171,7 @@ def load_and_combine_gtfs(gtfs_base_path):
     # create a route name - some agencies have this in short_name, some in long_name
     combined_routes['route_name'] = combined_routes.route_short_name.fillna(combined_routes.route_long_name).fillna(combined_routes.route_id)
 
-    print('Loaded the following routes:')
+    print('Loaded the following routes for year ', year)
     print(combined_routes.groupby(['agency_id','agency_name']).size())
 
     return GTFSFeed(
@@ -180,7 +183,7 @@ def load_and_combine_gtfs(gtfs_base_path):
         frequencies=combined_frequencies
     )
 
-def rail_ferry_brt(feed, mode='maximal'):
+def rail_ferry_brt(feed, year, mode='maximal'):
     """Step 2
     Identifies rail, ferry, and BRT stops from GTFS data.
     This step identifies transit stops that serve rail, light rail, subway, ferry, or some BRT routes. These routes-except for BRT-have their own designation
@@ -191,20 +194,18 @@ def rail_ferry_brt(feed, mode='maximal'):
     rail_route_types = [0, 1, 2, 7, 12]  # Including Intercity Rail. Note we exclude 6 - Aerial lift, suspended cable car (e.g., gondola lift, aerial tramway).
     if mode=='maximal':
         rail_route_types.append(5)  # cable car
-    """
-    TO DO: exclude Amtrak from minimal, and maybe other services that are coded as "2"
-
-    """
-    
     ferry_route_type = 4  # Ferry
 
     # Filter routes for rail and ferry
     rail_ferry_routes = feed.routes[feed.routes['route_type'].astype(int).isin(rail_route_types + [ferry_route_type])]
     
-    # Include specific BRT lines by route_long_name
-    brt_lines = ["Metro G Line 901", "Metro J Line 910/950", "GEARY RAPID"]
-    brt_routes = feed.routes[feed.routes['route_long_name'].isin(brt_lines)]
-    
+    # Include specific BRT lines by route_long_name, for maximal only
+    if mode=='maximal':
+        brt_lines = ['GEARY RAPID']
+        brt_routes = feed.routes[feed.routes['route_long_name'].isin(brt_lines)]
+        if year!='2025': stophere # may need to add others
+    else:
+        brt_routes = pd.DataFrame() 
     # Combine rail, ferry, and BRT routes
     all_routes = pd.concat([rail_ferry_routes, brt_routes], ignore_index=True)
     
@@ -219,7 +220,44 @@ def rail_ferry_brt(feed, mode='maximal'):
         geometry=gpd.points_from_xy(relevant_stops['stop_lon'], relevant_stops['stop_lat']),
         crs="EPSG:4326"
     )
+
+    # add BRT from shapefile
+    brt_fn = os.path.join(base_path,'statewide_BRT_'+year+'.zip') 
+    brt_gdf = gpd.read_file(brt_fn)
+    if mode=='minimal':
+        brt_gdf = brt_gdf[brt_gdf.Type=='min']
+    brt_gdf['tmp_idx'] = brt_gdf.index.values # to fill in NaNs in stop_id
+    brt_gdf.stop_id = brt_gdf.stop_id.fillna(brt_gdf['tmp_idx'])
+    brt_gdf['prefixed_stop_id'] = 'brt_'+brt_gdf.agency_pri+'_'+brt_gdf.stop_id.astype(str)
+    brt_gdf.drop_duplicates(subset='geometry', inplace=True)  # some Omnitrans routes are duplicates
+    assert brt_gdf.prefixed_stop_id.is_unique
+    brt_gdf.to_crs('EPSG:4326', inplace=True)
+    brt_gdf = brt_gdf[['prefixed_stop_id','geometry']]    
     
+    if mode=='maximal':
+        # add HSR, Amtrak, subway entrances and station parcels
+        fns = ['California_High-Speed_Rail_Statewide_Stations-shp.zip',
+               'amtrak.zip',
+               'subway_entrances_'+year+'.zip',
+               'parcels_combined_'+year+'.zip']
+        for fn in fns:
+            rail_gdf = gpd.read_file(os.path.join(base_path, fn))
+            rail_gdf.to_crs('EPSG:4326', inplace=True)
+            if 'subway' in fn:
+                rail_gdf['prefixed_stop_id'] = 'subway_entrance_'+rail_gdf.index.astype(str)
+            elif 'parcels' in fn:
+                rail_gdf['prefixed_stop_id'] = 'station_parcel_'+rail_gdf.index.astype(str)
+            elif 'amtrak' in fn:
+                rail_gdf = rail_gdf[(rail_gdf.StnType=='TRAIN') & (rail_gdf.State=='CA') & (rail_gdf.StaType!='Curbside Bus Stop only (no shelter)')]
+                rail_gdf['prefixed_stop_id'] = 'amtrak_'+rail_gdf.index.astype(str)
+            else:
+                assert 'High' in fn
+                rail_gdf['prefixed_stop_id'] = 'hsr_'+rail_gdf.Stat_Name
+            rail_gdf = rail_gdf[['prefixed_stop_id','geometry']]
+            
+            rail_ferry_brt_gdf = pd.concat([rail_ferry_brt_gdf, rail_gdf])
+        assert rail_ferry_brt_gdf.prefixed_stop_id.is_unique
+
     print(f"Extracted {len(rail_ferry_brt_gdf)} rail, ferry, and BRT stops")
     return rail_ferry_brt_gdf
 
@@ -451,7 +489,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     print(f"Found {len(result)} qualifying bus stops with intersections")
     return result.reset_index()
 
-def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', output_path='output'):
+def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal', output_path='output'):
     """Step #5
     
     Merge datasets
@@ -512,13 +550,14 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, mode='maximal', outpu
     os.makedirs(output_path, exist_ok=True)
     
     # Save both GeoPackage and Shapefile with mode in filename
-    combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}.gpkg"), driver="GPKG")
-    combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}.shp"), driver="ESRI Shapefile")
+    combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}_{year}.gpkg"), driver="GPKG")
+    # Can't do this as geodataframe contains both points and polygons
+    #combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}_{year}.shp"), driver="ESRI Shapefile")
     
     print(f"Saved merged stops to {output_path}")
     return combined_gdf
 
-def buffer_transit_stops(high_quality_stops_gdf, buffer_distance_miles=0.5, mode='maximal', output_path='output'):
+def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5, mode='maximal', output_path='output'):
     """Step 6
     Creates a buffer around transit stops.
     These are the high-quality transit areas resulting from the stops
@@ -538,37 +577,46 @@ def buffer_transit_stops(high_quality_stops_gdf, buffer_distance_miles=0.5, mode
     os.makedirs(output_path, exist_ok=True)
     
     # Save both GeoPackage and Shapefile with mode in filename
-    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}.gpkg"), driver="GPKG")
-    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}.shp"), driver="ESRI Shapefile")
+    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}.gpkg"), driver="GPKG")
+    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}.shp"), driver="ESRI Shapefile")
     
     print(f"Saved buffered stops to {output_path}")
     return projected_gdf
 
 
-def run_transit_zoning_pipeline(gtfs_path, output_base_path):
-    """Runs the complete pipeline for both minimal and maximal definitions."""
+def run_transit_zoning_pipeline(gtfs_path, output_base_path, year=None):
+    """Runs the complete pipeline for both minimal and maximal definitions.
+    If year is None, this function is called recursively for all years"""
     print("Starting Transit Zoning Pipeline")
-    
+
     # Create output directories
     output_path_max = os.path.join(output_base_path, "Maximal")
     output_path_min = os.path.join(output_base_path, "Minimal")
     os.makedirs(output_path_max, exist_ok=True)
     os.makedirs(output_path_min, exist_ok=True)
-    
+
+    yearlist = ['2014','2020','2025']
+    if year is None:
+        for year in yearlist:
+            run_transit_zoning_pipeline(gtfs_path, output_base_path, year=year)
+        return
+    else:
+        assert year in yearlist
+
     # Step 1: Load and combine GTFS data
     print("Step 1: Loading GTFS data")
-    feed = load_and_combine_gtfs(gtfs_path)
+    feed = load_and_combine_gtfs(gtfs_path, year)
     
     # Process maximal definition
     print("Processing maximal definition")
     result = {}
 
     for mode, output_path in zip(['minimal','maximal'], [output_path_min,output_path_max]):
-        rail_ferry_brt_stops = rail_ferry_brt(feed, mode=mode)
+        rail_ferry_brt_stops = rail_ferry_brt(feed, year, mode=mode)
         bus_peaks = bus_stops_peak_hours(feed, mode=mode)
         bus_intersections = identify_bus_stop_intersections(feed, bus_peaks, mode=mode)
-        merged = merge_transit_stops(rail_ferry_brt_stops, bus_intersections, mode=mode, output_path=output_path)
-        buffered = buffer_transit_stops(merged, mode=mode, output_path=output_path)
+        merged = merge_transit_stops(rail_ferry_brt_stops, bus_intersections, year, mode=mode, output_path=output_path)
+        buffered = buffer_transit_stops(merged, year, mode=mode, output_path=output_path)
         result[mode] = {
             'rail_ferry_brt': rail_ferry_brt_stops.copy(),
             'bus_peaks': bus_peaks.copy(),
