@@ -25,30 +25,7 @@ logging.basicConfig(level=logging.INFO)
 
 Replace these file paths with the ones you are using. Each file path should be a zipped GTFS file.
 """
-# Replace the file paths with your actual GTFS data
-# gtfs_path_2024 = [
-#     r"C:\Users\marce\Downloads\BART_Oct2024-20250211T180718Z-001.zip",
-#     r"C:\Users\marce\Downloads\SFBayFerry_Oct2024-20250211T180832Z-001.zip",
-#     r"C:\Users\marce\Downloads\VTA_Oct2024-20250211T180828Z-001.zip",
-#     r"C:\Users\marce\Downloads\MTS_Oct2024-20250211T180803Z-001.zip",
-#     r"C:\Users\marce\Downloads\NCTD_Oct2024-20250211T180813Z-001.zip",
-#     r"C:\Users\marce\Downloads\OCTA_Oct2024-20250211T180806Z-001.zip",
-#     r"C:\Users\marce\Downloads\Sac_Oct2024-20250211T180809Z-001.zip",
-#     r"C:\Users\marce\Downloads\LAMetro_Oct2024-20250211T180746Z-001.zip",
-#     r"C:\Users\marce\Downloads\MUNI_Oct2024-20250211T180756Z-001.zip",
-#     r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
-#     r"C:\Users\marce\Downloads\LADOT_Oct2024-20250211T180744Z-001.zip",
-#     r"C:\Users\marce\Downloads\CC_Oct2024-20250211T180738Z-001.zip",
-#     r"C:\Users\marce\Downloads\BBB_Oct2024-20250211T180731Z-001.zip",
-#     r"C:\Users\marce\Downloads\ACT_Oct2024-20250211T180726Z-001.zip"
-# ]
 
-#gtfs_path_2024 = [
-#    r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
-#    r"C:\Users\marce\Downloads\LAMetroRail_Oct2024-20250211T180752Z-001.zip",
-#    r"C:\Users\marce\Downloads\LADOT_Oct2024-20250211T180744Z-001.zip",
-#    r"C:\Users\marce\Downloads\BBB_Oct2024-20250211T180731Z-001.zip"
-#]
 
 # specific the directory where all the zipped GFTS feeds exist
 if os.path.exists(r"C:\Users\marce\Downloads"):
@@ -57,7 +34,7 @@ if os.path.exists(r"C:\Users\marce\Downloads"):
 elif os.path.exists('/Users/adammb/Desktop/transit_data/'):
     base_path = '/Users/adammb/Desktop/transit_data/' 
     gtfs_path = os.path.join(base_path, 'GTFS')
-    output_path = "/Users/adammb/Desktop/Transit_Output"
+    output_path = "/Users/adammb/Desktop/transit_output"
 else:
     raise Exception('paths not found')
 
@@ -84,8 +61,6 @@ def load_and_combine_gtfs(gtfs_path, year):
     path = os.path.join(gtfs_path, year)
     gtfs_fns= [os.path.join(path, ff) for ff in os.listdir(path) if ff.endswith('.zip') ]
     print(f"Loading feeds from {len(gtfs_fns)} GTFS files")
-
-
     for fn in gtfs_fns:
         prefix = os.path.splitext(os.path.basename(fn))[0][:10]
         print(f"Processing feed: {fn}")
@@ -103,6 +78,9 @@ def load_and_combine_gtfs(gtfs_path, year):
         # note: some agencies use the same agency_id (e.g. AC Transit and Culver City Bus)
         # this is OK as their routes do not serve the same stop
         # but let's confirm this when we have all the agencies TO DO
+        if 'agency_id' not in agency.columns:
+            agency['agency_id'] = agency.agency_name
+
         if 'agency_id' in routes.columns:
             routes = routes.merge(agency[['agency_id', 'agency_name']],
                              on='agency_id', how='left')
@@ -142,12 +120,12 @@ def load_and_combine_gtfs(gtfs_path, year):
         combined_agency[fn] = agency
         if not frequencies.empty:
             combined_frequencies[fn] = frequencies
-    
+
     # Combine data
     combined_routes = pd.concat(combined_routes.values(), ignore_index=True)
     combined_trips = pd.concat(combined_trips.values(), ignore_index=True)
     combined_stop_times = pd.concat(combined_stop_times.values(), ignore_index=True)
-    combined_stops = pd.concat(combined_stops.values(), ignore_index=True)
+    combined_stops = pd.concat(combined_stops.values(), ignore_index=True).drop_duplicates()  # e.g. MTA files duplicate stops
     combined_agency = pd.concat(combined_agency.values(), ignore_index=True)
     # Merge frequencies into trips if available
     if len(combined_frequencies)>0:
@@ -183,10 +161,11 @@ def load_and_combine_gtfs(gtfs_path, year):
         frequencies=combined_frequencies
     )
 
-def rail_ferry_brt(feed, year, mode='maximal'):
+def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
     """Step 2
     Identifies rail, ferry, and BRT stops from GTFS data.
-    This step identifies transit stops that serve rail, light rail, subway, ferry, or some BRT routes. These routes-except for BRT-have their own designation
+    This step identifies transit stops that serve rail, light rail, subway, ferry, or some BRT routes. 
+    These routes-except for BRT-have their own designation
     in GTFS files and all count for HQ transit stops. BRT routes are selected by name.
     """
     # Define route types based on mode
@@ -198,22 +177,59 @@ def rail_ferry_brt(feed, year, mode='maximal'):
 
     # Filter routes for rail and ferry
     rail_ferry_routes = feed.routes[feed.routes['route_type'].astype(int).isin(rail_route_types + [ferry_route_type])]
-    
-    # Include specific BRT lines by route_long_name, for maximal only
+    rail_ferry_routes['qualify'] = rail_ferry_routes.route_type.apply(lambda x: 'rail_gtfs' if x in rail_route_types else 'ferry_gtfs' if x==4 else 'error')
+
+    # Include specific BRT lines by route_name, for maximal only
+    # TO ADD: San Joaquin, Culver City Bus
     if mode=='maximal':
-        brt_lines = ['GEARY RAPID']
-        brt_routes = feed.routes[feed.routes['route_long_name'].isin(brt_lines)]
-        if year!='2025': stophere # may need to add others
+        brt_lines = {'all_years': [
+                      #('OMNITRANS','sbX Green Line')
+                      ],
+                    '2014': [
+                         ('Metro - Los Angeles', 'Metro Orange Line  (901)'),
+                         ('Metro - Los Angeles','Metro Silver Line  (910)'),
+                         #('MTS', '215'), ('MTS', '235'), ('MTS', '237'),
+                         #('MTS', '280'), ('MTS', '290'),                      
+                          ],
+                     '2020': [
+                         ('Metro - Los Angeles', '901'),
+                         ('Metro - Los Angeles','910/950'),
+                         ('Fresno Public Transportation (FAX)','01'),
+                         ('MTS', '201'), ('MTS', '202'), ('MTS', '204'),
+                         ('MTS', '215'), ('MTS', '225'), ('MTS', '235'), ('MTS', '237'),
+                         ('MTS', '280'), ('MTS', '290'), 
+                           ],
+                     '2025': [('San Francisco Municipal Transportation Agency','38'),
+                           ('San Francisco Municipal Transportation Agency','38R'),
+                           ('Metro - Los Angeles', 'Metro G Line (Orange) 901'),
+                           ('Metro - Los Angeles', 'Metro J Line (Silver) 910/950'),                           
+                           ('AC TRANSIT', '1T'),
+                           ('Fresno Area Express','01'),
+                           ('MTS', '227'), ('MTS', '201'), ('MTS', '202'), ('MTS', '204'),
+                           ('MTS', '215'), ('MTS', '225'), ('MTS', '235'), ('MTS', '237'),
+                           ('MTS', '280'), ('MTS', '290'), 
+                           ]}
+        print('Including the following BRT routes:')
+        print(brt_lines['all_years']+brt_lines[year])
+        brt_routes = feed.routes.set_index(['agency_name','route_name']).loc[brt_lines['all_years']+brt_lines[year]]
+        assert len(brt_routes)==len(brt_lines['all_years']+brt_lines[year])
+        brt_routes['qualify'] = 'brt_list'
     else:
         brt_routes = pd.DataFrame() 
+
     # Combine rail, ferry, and BRT routes
     all_routes = pd.concat([rail_ferry_routes, brt_routes], ignore_index=True)
     
     # Get stops for these routes
-    relevant_trips = feed.trips[feed.trips['prefixed_route_id'].isin(all_routes['prefixed_route_id'])]
-    relevant_stop_times = feed.stop_times[feed.stop_times['prefixed_trip_id'].isin(relevant_trips['prefixed_trip_id'])]
-    relevant_stops = feed.stops[feed.stops['prefixed_stop_id'].isin(relevant_stop_times['prefixed_stop_id'])]
-    
+    # old way - doesn't preserve the qualification
+    # relevant_trips = feed.trips[feed.trips['prefixed_route_id'].isin(all_routes['prefixed_route_id'])]
+    # relevant_stop_times = feed.stop_times[feed.stop_times['prefixed_trip_id'].isin(relevant_trips['prefixed_trip_id'])]
+    # relevant_stops = feed.stops[feed.stops['prefixed_stop_id'].isin(relevant_stop_times['prefixed_stop_id'])]
+
+    relevant_trips = feed.trips.set_index('prefixed_route_id').join(all_routes[['prefixed_route_id','qualify']].set_index('prefixed_route_id'), how='right')
+    relevant_stop_times = feed.stop_times.set_index('prefixed_trip_id').join(relevant_trips[['prefixed_trip_id','qualify']].set_index('prefixed_trip_id'), how='right')
+    relevant_stops = feed.stops.set_index('prefixed_stop_id').join(relevant_stop_times[['prefixed_stop_id','qualify']].set_index('prefixed_stop_id'), how='right').drop_duplicates()
+
     # Create GeoDataFrame
     rail_ferry_brt_gdf = gpd.GeoDataFrame(
         relevant_stops,
@@ -222,41 +238,40 @@ def rail_ferry_brt(feed, year, mode='maximal'):
     )
 
     # add BRT from shapefile
-    brt_fn = os.path.join(base_path,'statewide_BRT_'+year+'.zip') 
+    brt_fn = os.path.join(base_path,'other_transit','statewide_BRT_'+year+'.zip') 
     brt_gdf = gpd.read_file(brt_fn)
-    if mode=='minimal':
-        brt_gdf = brt_gdf[brt_gdf.Type=='min']
     brt_gdf['tmp_idx'] = brt_gdf.index.values # to fill in NaNs in stop_id
     brt_gdf.stop_id = brt_gdf.stop_id.fillna(brt_gdf['tmp_idx'])
     brt_gdf['prefixed_stop_id'] = 'brt_'+brt_gdf.agency_pri+'_'+brt_gdf.stop_id.astype(str)
     brt_gdf.drop_duplicates(subset='geometry', inplace=True)  # some Omnitrans routes are duplicates
-    assert brt_gdf.prefixed_stop_id.is_unique
     brt_gdf.to_crs('EPSG:4326', inplace=True)
     brt_gdf = brt_gdf[['prefixed_stop_id','geometry']]    
-    
+    brt_gdf['qualify'] = 'brt_shapefile'
+    rail_ferry_brt_gdf = pd.concat([rail_ferry_brt_gdf, brt_gdf])
+
     if mode=='maximal':
         # add HSR, Amtrak, subway entrances and station parcels
-        fns = ['California_High-Speed_Rail_Statewide_Stations-shp.zip',
-               'amtrak.zip',
-               'subway_entrances_'+year+'.zip',
-               'parcels_combined_'+year+'.zip']
-        for fn in fns:
-            rail_gdf = gpd.read_file(os.path.join(base_path, fn))
+        fns = [('amtrak.zip','amtrak'),
+               ('subway_entrances_'+year+'.zip','subway_entrance'),
+               ('parcels_combined_'+year+'.zip', 'station_parcel')]
+        if include_planned:
+            assert year=='2025'
+            fns+=[('CASHR.zip','hsr'), ]  # add MPO plans too
+        for fn, prefix in fns:
+            rail_gdf = gpd.read_file(os.path.join(base_path, 'other_transit', fn))
             rail_gdf.to_crs('EPSG:4326', inplace=True)
-            if 'subway' in fn:
-                rail_gdf['prefixed_stop_id'] = 'subway_entrance_'+rail_gdf.index.astype(str)
-            elif 'parcels' in fn:
-                rail_gdf['prefixed_stop_id'] = 'station_parcel_'+rail_gdf.index.astype(str)
-            elif 'amtrak' in fn:
+            if 'amtrak' in fn:
                 rail_gdf = rail_gdf[(rail_gdf.StnType=='TRAIN') & (rail_gdf.State=='CA') & (rail_gdf.StaType!='Curbside Bus Stop only (no shelter)')]
-                rail_gdf['prefixed_stop_id'] = 'amtrak_'+rail_gdf.index.astype(str)
+
+            if 'subway' in fn or 'parcels' in fn or 'amtrak' in fn:
+                rail_gdf['prefixed_stop_id'] = prefix+'_'+rail_gdf.index.astype(str)
             else:
-                assert 'High' in fn
-                rail_gdf['prefixed_stop_id'] = 'hsr_'+rail_gdf.Stat_Name
+                assert 'CASHR' in fn
+                rail_gdf['prefixed_stop_id'] = prefix+'_'+rail_gdf.Stat_Name
             rail_gdf = rail_gdf[['prefixed_stop_id','geometry']]
+            rail_gdf['qualify'] = prefix
             
             rail_ferry_brt_gdf = pd.concat([rail_ferry_brt_gdf, rail_gdf])
-        assert rail_ferry_brt_gdf.prefixed_stop_id.is_unique
 
     print(f"Extracted {len(rail_ferry_brt_gdf)} rail, ferry, and BRT stops")
     return rail_ferry_brt_gdf
@@ -478,18 +493,17 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
                 intersecting_stops.add(stop_id1)
                 intersecting_stop_routes[stop_id1] = all_routes_english
 
-    # Generate result using supervisor's method
     result = unique_stops.loc[list(intersecting_stops)][['geometry']]
     result = result.join(pd.Series(intersecting_stop_routes).to_frame('prefixed_route_ids'))
     result = result.to_crs(epsg=4326)  # Convert back to WGS84
     
-    # Add qualification field
-    result['qualification'] = f'Bus stop with intersection within {distance_threshold_feet} feet'
+    # Add qualify field
+    result['qualify'] = f'Bus stops within {distance_threshold_feet} feet'
     
     print(f"Found {len(result)} qualifying bus stops with intersections")
     return result.reset_index()
 
-def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal', output_path='output'):
+def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal', include_planned=False, output_path='output'):
     """Step #5
     
     Merge datasets
@@ -503,61 +517,27 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal',
     assert bus_stops_gdf.crs=='EPSG:4326'
     assert mode in ['maximal', 'minimal']
     assert bus_stops_gdf.prefixed_stop_id.is_unique
+    assert bus_stops_gdf is not None and not bus_stops_gdf.empty
 
-    # Assign qualification labels
-    rail_ferry_brt_gdf['qualification'] = 'Rail, Ferry, BRT stop'
-    rail_ferry_brt_gdf
-    if bus_stops_gdf is None or bus_stops_gdf.empty:
-        print("No qualifying bus stops found. Using only rail/ferry/BRT stops.")
-        combined_gdf = rail_ferry_brt_gdf.copy()
-    else:
-        #bus_stops_gdf['qualification'] = 'High-Frequency Bus Stop'
-        combined_gdf = pd.concat([rail_ferry_brt_gdf, bus_stops_gdf])
-    
-    # Group by stop_id to handle duplicates - ensure index is stop_id if not already
-    # should not be needed! The only duplicates are rail/bus/BRT, if they are the same stop as a bus
-    #agg_funcs = {
-    #    'qualification': lambda x: '; '.join(set(x.dropna())),
-    #    'geometry': 'first',
-    #    'stop_lat': 'first',
-    #    'stop_lon': 'first',
-    #    'stop_name': 'first',
-    #    'agency_name': lambda x: '; '.join(set(x.dropna().astype(str))) if 'agency_name' in combined_gdf.columns else None
-    #}
-    # Only include columns that exist
-    #existing_columns = [col for col in agg_funcs.keys() if col in combined_gdf.columns]
-    #agg_funcs = {col: agg_funcs[col] for col in existing_columns}
-    
-    #all_stops_aggregated = combined_gdf.groupby(level=0).agg(agg_funcs).reset_index()
-
-    # Convert to GeoDataFrame # should be this already
-    #result = gpd.GeoDataFrame(all_stops_aggregated, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
-   
-    # Convert to GeoDataFrame
-    combined_gdf = gpd.GeoDataFrame(combined_gdf, geometry='geometry', crs=rail_ferry_brt_gdf.crs)
-    # drop unneeded columns
-    combined_gdf = combined_gdf[['prefixed_stop_id', 'qualification', 'prefixed_route_ids', 'geometry']]
+    combined_gdf = pd.concat([rail_ferry_brt_gdf, bus_stops_gdf])
+    combined_gdf = combined_gdf[['prefixed_stop_id', 'qualify', 'prefixed_route_ids', 'geometry']]
 
     # Rename columns for shapefile compatibility if needed
     combined_gdf.rename(columns={
         'prefixed_stop_id': 'stop_id',
-        'qualification': 'qualify',
-        #'agency_name': 'agency'  if 'agency_name' in result.columns else None,
         'prefixed_route_ids':'route_ids'
     }, inplace=True)
-
-    # Create output directory if it doesn't exist
-    os.makedirs(output_path, exist_ok=True)
     
     # Save both GeoPackage and Shapefile with mode in filename
-    combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}_{year}.gpkg"), driver="GPKG")
+    suffix = '_with_planned' if include_planned else ''
+    combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}_{year}{suffix}.gpkg"), driver="GPKG")
     # Can't do this as geodataframe contains both points and polygons
     #combined_gdf.to_file(os.path.join(output_path, f"high_quality_stops_{mode}_{year}.shp"), driver="ESRI Shapefile")
     
     print(f"Saved merged stops to {output_path}")
     return combined_gdf
 
-def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5, mode='maximal', output_path='output'):
+def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5, mode='maximal', include_planned=False, output_path='output'):
     """Step 6
     Creates a buffer around transit stops.
     These are the high-quality transit areas resulting from the stops
@@ -577,57 +557,70 @@ def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5
     os.makedirs(output_path, exist_ok=True)
     
     # Save both GeoPackage and Shapefile with mode in filename
-    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}.gpkg"), driver="GPKG")
-    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}.shp"), driver="ESRI Shapefile")
+    suffix = '_with_planned' if include_planned else ''
+    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}{suffix}.gpkg"), driver="GPKG")
+    projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}{suffix}.shp"), driver="ESRI Shapefile")
     
     print(f"Saved buffered stops to {output_path}")
     return projected_gdf
 
-
-def run_transit_zoning_pipeline(gtfs_path, output_base_path, year=None):
+def run_transit_zoning_pipeline(gtfs_path, output_path, year=None):
     """Runs the complete pipeline for both minimal and maximal definitions.
     If year is None, this function is called recursively for all years"""
-    print("Starting Transit Zoning Pipeline")
+    print("Starting Transit Zoning Pipeline for year: ",year)
 
     # Create output directories
-    output_path_max = os.path.join(output_base_path, "Maximal")
-    output_path_min = os.path.join(output_base_path, "Minimal")
+    output_path_max = os.path.join(output_path, "Maximal")
+    output_path_min = os.path.join(output_path, "Minimal")
     os.makedirs(output_path_max, exist_ok=True)
     os.makedirs(output_path_min, exist_ok=True)
 
     yearlist = ['2014','2020','2025']
     if year is None:
         for year in yearlist:
-            run_transit_zoning_pipeline(gtfs_path, output_base_path, year=year)
+            run_transit_zoning_pipeline(gtfs_path, output_path, year=year)
         return
     else:
         assert year in yearlist
 
-    # Step 1: Load and combine GTFS data
     print("Step 1: Loading GTFS data")
     feed = load_and_combine_gtfs(gtfs_path, year)
     
-    # Process maximal definition
-    print("Processing maximal definition")
-    result = {}
-
     for mode, output_path in zip(['minimal','maximal'], [output_path_min,output_path_max]):
+        print(f"Processing {mode} definition")
         rail_ferry_brt_stops = rail_ferry_brt(feed, year, mode=mode)
         bus_peaks = bus_stops_peak_hours(feed, mode=mode)
         bus_intersections = identify_bus_stop_intersections(feed, bus_peaks, mode=mode)
+
         merged = merge_transit_stops(rail_ferry_brt_stops, bus_intersections, year, mode=mode, output_path=output_path)
         buffered = buffer_transit_stops(merged, year, mode=mode, output_path=output_path)
-        result[mode] = {
-            'rail_ferry_brt': rail_ferry_brt_stops.copy(),
-            'bus_peaks': bus_peaks.copy(),
-            'bus_intersections': bus_intersections.copy(),
-            'merged': merged.copy(),
-            'buffered': buffered.copy()
-        }
+
+        if year=='2025' and mode=='maximal':
+            # run a second time with the planned transit too
+            rail_ferry_brt_stops = rail_ferry_brt(feed, year, mode=mode, include_planned=True)
+            merged = merge_transit_stops(rail_ferry_brt_stops, bus_intersections, year, mode=mode, include_planned=True, output_path=output_path)
+            buffered = buffer_transit_stops(merged, year, mode=mode, include_planned=True, output_path=output_path)
 
     print("Transit Zoning Pipeline completed successfully")
-    
-    return result
+
+def identify_paired_routes():
+    """Identify routes that we want to treat as a single route, 
+      e.g. because counterclockwise/clockwise or 1A/1B/1C
+      This is to avoid having an "intersection" between functionally the same route running in the opposite direction"""
+ 
+    output_dfs = {}
+    for year in ['2014','2020','2025']:
+        feed= load_and_combine_gtfs(gtfs_path, year)
+        routes = feed.routes[feed.routes['route_type'].astype(int).isin([3,11])] 
+        wise_routes = routes[routes.route_name.str.lower().str.contains('wise')]
+        letter_routes = routes[routes.route_short_name.astype(str).str.lower().apply(lambda x: 'a' in x or 'b' in x or 'c' in x )]
+
+        cols = ['agency_name','route_short_name','route_long_name']
+
+        paired_routes = pd.concat([wise_routes,letter_routes])[cols].drop_duplicates().sort_values(by=cols)
+        paired_routes['year'] = year
+        output_dfs[year] = paired_routes.copy()
+    pd.concat(output_dfs.values()).to_csv(os.path.join(output_path, 'paired_routes.csv'))
 
 if __name__ == "__main__":
     
