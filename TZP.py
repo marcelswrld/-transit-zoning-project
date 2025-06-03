@@ -94,6 +94,23 @@ def load_and_combine_gtfs(gtfs_path, year):
         # Read frequencies if available
         frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
         
+        # replace routes that are separate for clockwise/counterclockwise
+        if 'route_short_name' not in routes.columns:
+            routes['route_short_name'] = None
+        wiseroutes = routes[routes.route_short_name.astype(str).str.lower().str.contains('counterclockwise')]
+        wiseroutes2 = routes[routes.route_short_name.astype(str).str.lower().str.contains('counter-clockwise')]
+        wiseroutes = pd.concat([wiseroutes, wiseroutes2])
+        assert routes.index.is_unique # to allow use of index below
+        for ccw_idx, ccw_route in wiseroutes.iterrows():
+            shortname = ccw_route.route_short_name.lower().replace('counter-','').replace('counter','')
+            cw_idx = routes[routes.route_short_name.astype(str).str.lower().str.contains(shortname)].index
+            if len(cw_idx)==0: continue
+            if len(cw_idx)>1: raise Exception(f'multiple cw/ccw routes found for {shortname}')
+            oldroute_id, newroute_id = routes.loc[cw_idx[0],'route_id'], ccw_route.route_id
+            routes.loc[ccw_idx,'route_short_name'] = shortname.replace('clockwise','ccw_and_cw')
+            trips.loc[trips.route_id==oldroute_id, 'route_id'] = newroute_id
+            routes.drop(cw_idx, inplace=True)  # retain only the ccw version
+
         # Apply prefixes to IDs consistently
         routes['agency_id'] = routes['agency_id'].astype(str)
         routes['prefixed_agency_id'] = prefix + "_" + routes['agency_id']
@@ -180,16 +197,17 @@ def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
     rail_ferry_routes['qualify'] = rail_ferry_routes.route_type.apply(lambda x: 'rail_gtfs' if x in rail_route_types else 'ferry_gtfs' if x==4 else 'error')
 
     # Include specific BRT lines by route_name, for maximal only
-    # TO ADD: San Joaquin, Culver City Bus
     if mode=='maximal':
         brt_lines = {'all_years': [
-                      #('OMNITRANS','sbX Green Line')
+                      ('OMNITRANS','sbX Green Line'),
+                      ('Culver CityBus','Rapid 6'),
                       ],
                     '2014': [
                          ('Metro - Los Angeles', 'Metro Orange Line  (901)'),
                          ('Metro - Los Angeles','Metro Silver Line  (910)'),
-                         #('MTS', '215'), ('MTS', '235'), ('MTS', '237'),
-                         #('MTS', '280'), ('MTS', '290'),                      
+                         ('MTS', '215'), ('MTS', '235'), ('MTS', '237'),
+                         ('MTS', '280'), ('MTS', '290'),  
+                         ('San Joaquin Regional Transit District (RTD)','40'), ('San Joaquin Regional Transit District (RTD)','44'),
                           ],
                      '2020': [
                          ('Metro - Los Angeles', '901'),
@@ -198,7 +216,10 @@ def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
                          ('MTS', '201'), ('MTS', '202'), ('MTS', '204'),
                          ('MTS', '215'), ('MTS', '225'), ('MTS', '235'), ('MTS', '237'),
                          ('MTS', '280'), ('MTS', '290'), 
-                           ],
+                         ('San Joaquin Regional Transit District (RTD)','40'),('San Joaquin Regional Transit District (RTD)','43'),
+                         ('San Joaquin Regional Transit District (RTD)','44'), ('San Joaquin Regional Transit District (RTD)','47'),
+                         ('San Joaquin Regional Transit District (RTD)','49'),
+                            ],
                      '2025': [('San Francisco Municipal Transportation Agency','38'),
                            ('San Francisco Municipal Transportation Agency','38R'),
                            ('Metro - Los Angeles', 'Metro G Line (Orange) 901'),
@@ -208,6 +229,9 @@ def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
                            ('MTS', '227'), ('MTS', '201'), ('MTS', '202'), ('MTS', '204'),
                            ('MTS', '215'), ('MTS', '225'), ('MTS', '235'), ('MTS', '237'),
                            ('MTS', '280'), ('MTS', '290'), 
+                           ('San Joaquin Regional Transit District (RTD)','40L'),('San Joaquin Regional Transit District (RTD)','43'),
+                           ('San Joaquin Regional Transit District (RTD)','44'), ('San Joaquin Regional Transit District (RTD)','47'),
+                           ('San Joaquin Regional Transit District (RTD)','49'),
                            ]}
         print('Including the following BRT routes:')
         print(brt_lines['all_years']+brt_lines[year])
@@ -219,16 +243,18 @@ def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
 
     # Combine rail, ferry, and BRT routes
     all_routes = pd.concat([rail_ferry_routes, brt_routes], ignore_index=True)
-    
+    all_routes = all_routes[['prefixed_route_id','qualify']].set_index('prefixed_route_id')
     # Get stops for these routes
     # old way - doesn't preserve the qualification
     # relevant_trips = feed.trips[feed.trips['prefixed_route_id'].isin(all_routes['prefixed_route_id'])]
     # relevant_stop_times = feed.stop_times[feed.stop_times['prefixed_trip_id'].isin(relevant_trips['prefixed_trip_id'])]
     # relevant_stops = feed.stops[feed.stops['prefixed_stop_id'].isin(relevant_stop_times['prefixed_stop_id'])]
 
-    relevant_trips = feed.trips.set_index('prefixed_route_id').join(all_routes[['prefixed_route_id','qualify']].set_index('prefixed_route_id'), how='right')
-    relevant_stop_times = feed.stop_times.set_index('prefixed_trip_id').join(relevant_trips[['prefixed_trip_id','qualify']].set_index('prefixed_trip_id'), how='right')
-    relevant_stops = feed.stops.set_index('prefixed_stop_id').join(relevant_stop_times[['prefixed_stop_id','qualify']].set_index('prefixed_stop_id'), how='right').drop_duplicates()
+    relevant_trips = feed.trips.set_index('prefixed_route_id').join(all_routes, how='right')
+    relevant_trips = relevant_trips[['prefixed_trip_id','qualify']].set_index('prefixed_trip_id')
+    relevant_stop_times = feed.stop_times.set_index('prefixed_trip_id').join(relevant_trips, how='right')
+    relevant_stop_times = relevant_stop_times[['prefixed_stop_id','qualify']].set_index('prefixed_stop_id')
+    relevant_stops = feed.stops.set_index('prefixed_stop_id').join(relevant_stop_times, how='right').drop_duplicates()
 
     # Create GeoDataFrame
     rail_ferry_brt_gdf = gpd.GeoDataFrame(
@@ -605,18 +631,20 @@ def run_transit_zoning_pipeline(gtfs_path, output_path, year=None):
 
 def identify_paired_routes():
     """Identify routes that we want to treat as a single route, 
-      e.g. because counterclockwise/clockwise or 1A/1B/1C
-      This is to avoid having an "intersection" between functionally the same route running in the opposite direction"""
+      e.g. because 1A/1B/1C (counterclockwise/clockwise are handled automatically)
+
+      This is to avoid having an "intersection" between functionally the same route running in the opposite direction
+      
+      Exports a csv file for manual review"""
  
     output_dfs = {}
     for year in ['2014','2020','2025']:
         feed= load_and_combine_gtfs(gtfs_path, year)
         routes = feed.routes[feed.routes['route_type'].astype(int).isin([3,11])] 
         wise_routes = routes[routes.route_name.str.lower().str.contains('wise')]
-        letter_routes = routes[routes.route_short_name.astype(str).str.lower().apply(lambda x: 'a' in x or 'b' in x or 'c' in x )]
+        letter_routes = routes[routes.route_short_name.astype(str).str.contains(r'[a-zA-Z]')]
 
         cols = ['agency_name','route_short_name','route_long_name']
-
         paired_routes = pd.concat([wise_routes,letter_routes])[cols].drop_duplicates().sort_values(by=cols)
         paired_routes['year'] = year
         output_dfs[year] = paired_routes.copy()
