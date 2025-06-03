@@ -82,6 +82,8 @@ def load_and_combine_gtfs(gtfs_path, year):
                 assert len(agency) ==1  # if not, we need to adapt the code
                 agencyname = agency.iloc[0]['agency_name']
                 routes['agency_name'] = agencyname if pd.notnull(agencyname) else prefix
+        else:
+             routes['agency_name'] = prefix
 
         # Read frequencies if available
         frequencies = feed.frequencies.copy() if hasattr(feed, 'frequencies') else pd.DataFrame()
@@ -167,6 +169,8 @@ def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
     This step identifies transit stops that serve rail, light rail, subway, ferry, or some BRT routes. 
     These routes-except for BRT-have their own designation
     in GTFS files and all count for HQ transit stops. BRT routes are selected by name.
+
+    Then, other geospatial data (Amtrak, other BRT lines, station parcels and points) are merged in too.
     """
     # Define route types based on mode
     assert mode in ['maximal', 'minimal']
@@ -182,11 +186,10 @@ def rail_ferry_brt(feed, year, mode='maximal', include_planned=False):
 
     # Include specific BRT lines by route_name, for maximal only
     if mode=='maximal':
-        brt_lines = pd.read_csv(os.path.join(base_path,'other_transit','brt_routes.csv'))
-        brt_lines = brt_lines[brt_lines.year.astype(str)==year]
-        brt_lines.set_index(['agency_name','route_name'], inplace=True)
-        assert len(brt_lines)=={'2025':23, '2020':19, '2014':11}[year]
-        brt_routes = feed.routes.set_index(['agency_name','route_name']).loc[brt_lines.index]
+        brt_list = pd.read_csv(os.path.join(base_path,'other_transit','brt_routes.csv'))
+        brt_list = brt_list[brt_list.year.astype(str)==year]
+        brt_list.set_index(['agency_name','route_name'], inplace=True)
+        brt_routes = feed.routes.set_index(['agency_name','route_name']).loc[brt_list.index]
         brt_routes['qualify'] = 'brt_list'
     else:
         brt_routes = pd.DataFrame() 
@@ -251,11 +254,11 @@ def bus_stops_peak_hours(feed, mode='maximal'):
     
     Identifies bus stops with frequent service during peak hours (morning and afternoon). 
     
-    In the maximal definition, a stop qualifies if it has, from one route, at least one hour-long period with 3 arrivals throughout the morning and afternoon peak hours. 
+    In the maximal definition, a stop qualifies if it has, from one route, at least one hour-long period with 3 arrivals throughout the morning and afternoon. 
     This hour-long period need not start at the beginning of an hour; for example, it could stretch from 7:30-8:30AM. 
+    Mornings and afternoons are defined from midnight to noon and noon to midnight.
     
     In the minimal definition, a stop qualifies if it has, from one route, at least 9 buses arriving during the morning peak AND 12 buses in the afternoon peak. 
-
     The morning peak is 6-9AM and the afternoon peak is 3-7PM.
     """
     
@@ -377,8 +380,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     from intersecting, which Cal-ITP believed was against the intent of the law.
 
     For minimal definition:
-    - Only actual intersections between different routes count
-    - No combining parallel routes
+    - Intersecting routes must stop at different stops, in order to avoid combining parallel routes
     
     For maximal definition:
     - All stops along a route with any intersection count
@@ -394,17 +396,14 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     """
     print(f"Finding bus stop intersections in {mode} mode")
     assert mode in ['maximal', 'minimal']
+    assert bus_peak_gdf.index.name == 'new_stop_id'
     
    # Set distance threshold based on mode and convert from feet to meters for UTM projection
     distance_threshold_feet = 150 if mode == 'minimal' else 500  # feet
     distance_threshold_meters = distance_threshold_feet * 0.3048  # Conversion to meters
     
-    # Ensure CRS is consistent and bus_peak_gdf is indexed by new_stop_id
-    bus_peak_gdf = bus_peak_gdf.to_crs(epsg=32611)  # Project to UTM for accurate distances
-    
-    # Ensure index is new_stop_id
-    if bus_peak_gdf.index.name != 'new_stop_id':
-        bus_peak_gdf = bus_peak_gdf.set_index('new_stop_id')
+    # Project to UTM for accurate distances
+    bus_peak_gdf = bus_peak_gdf.to_crs(epsg=32611)  
     
     # Add plain English route names
     routenames = feed.routes[['prefixed_route_id','agency_name','route_name']].set_index('prefixed_route_id')
@@ -418,17 +417,14 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     intersecting_stops = set()
     intersecting_stop_routes = {}
     
-    # a spatial index with buffers 
     sindex = unique_stops.sindex
     sindex_map = unique_stops.reset_index()['new_stop_id'].to_dict()
 
-    # Process each stop
     for stop_id1, stop1 in unique_stops.iterrows():
-        # Get all routes at this stop
+        # Get all route ids at this stop
         routes_at_stop1 = set(bus_peak_gdf.loc[[stop_id1], 'prefixed_route_id'])
         
         # Find all stops within threshold distance
-        #nearby_stop_ids = unique_stops[unique_stops.geometry.dwithin(stop1.geometry, distance_threshold_meters)].index  # old version, without spatial index
         nearby_stop_ids = sindex.query(stop1.geometry, predicate='dwithin', distance=distance_threshold_meters)
         nearby_stop_ids = [sindex_map[xx] for xx in nearby_stop_ids]
         nearby = bus_peak_gdf.loc[nearby_stop_ids]
@@ -436,7 +432,7 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
         # Exclude self
         nearby = nearby[nearby.index != stop_id1]
         
-        if len(nearby) == 0:
+        if len(nearby) == 0: # no nearby routes
             continue
             
         # Get routes at nearby stops
@@ -473,13 +469,13 @@ def identify_bus_stop_intersections(feed, bus_peak_gdf, mode='maximal'):
     print(f"Found {len(result)} qualifying bus stops with intersections")
     return result.reset_index()
 
-def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal', include_planned=False, output_path='output'):
+def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal', include_planned=False, output_path=output_path):
     """Step #5
     
     Merge datasets
 
     This step combines the rail/ferry/BRT stops and high-quality bus stops (from steps 2 and 4) into one dataset. 
-    It then exports this dataset as a shapefile of the stops (without 1/2 mile buffers) to a designated file path.
+    It then exports this dataset as a GPKG of the stops (without 1/2 mile buffers) to a designated file path.
     """
 
     # Ensure CRS is consistent
@@ -507,7 +503,7 @@ def merge_transit_stops(rail_ferry_brt_gdf, bus_stops_gdf, year, mode='maximal',
     print(f"Saved merged stops to {output_path}")
     return combined_gdf
 
-def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5, mode='maximal', include_planned=False, output_path='output'):
+def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5, mode='maximal', include_planned=False, output_path=output_path):
     """Step 6
     Creates a buffer around transit stops.
     These are the high-quality transit areas resulting from the stops
@@ -530,8 +526,12 @@ def buffer_transit_stops(high_quality_stops_gdf, year, buffer_distance_miles=0.5
     suffix = '_with_planned' if include_planned else ''
     projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}{suffix}.gpkg"), driver="GPKG")
     #projected_gdf.to_file(os.path.join(output_path, f"buffered_stops_{mode}_{year}{suffix}.shp"), driver="ESRI Shapefile")
-    
     print(f"Saved buffered stops to {output_path}")
+    
+    # Save dissolved version 
+    dissolved = projected_gdf.dissolve().explode()[['geometry']]
+    dissolved.to_file(os.path.join(output_path, f"dissolved_stops_{mode}_{year}{suffix}.gpkg"), driver="GPKG")
+
     return projected_gdf
 
 def run_transit_zoning_pipeline(gtfs_path, output_path, year=None):
