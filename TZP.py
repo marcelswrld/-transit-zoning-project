@@ -56,12 +56,12 @@ def load_and_combine_gtfs(gtfs_path, year):
     gtfs_fns= [os.path.join(path, ff) for ff in os.listdir(path) if ff.endswith('.zip') ]
 
     # make sure that the prefix will uniquely identify the file
-    prefixes = [os.path.splitext(os.path.basename(fn))[0][:10] for fn in gtfs_fns]
+    prefixes = [os.path.splitext(os.path.basename(fn))[0][:10].strip('_') for fn in gtfs_fns]
     assert len(set(prefixes)) == len(prefixes)
 
     print(f"Loading feeds from {len(gtfs_fns)} GTFS files")
     for fn in gtfs_fns:
-        prefix = os.path.splitext(os.path.basename(fn))[0][:10]
+        prefix = os.path.splitext(os.path.basename(fn))[0][:10].strip('_')
         print(f"Processing feed: {fn}")
         feed = ptg.load_feed(fn, view=None)
         
@@ -73,7 +73,7 @@ def load_and_combine_gtfs(gtfs_path, year):
         assert routes.index.is_unique # to allow use of index below
         
         # Read agency data - needed for BRT
-        if hasattr(feed, 'agency'):
+        if hasattr(feed, 'agency') and not feed.agency.empty:
             agency = feed.agency.copy()
             if 'agency_id' in routes.columns:
                 routes = routes.merge(agency[['agency_id', 'agency_name']],
