@@ -91,19 +91,19 @@ def load_and_combine_gtfs(gtfs_path, year):
         # replace routes that are separate for clockwise/counterclockwise
         if 'route_short_name' not in routes.columns:
             routes['route_short_name'] = routes.route_long_name
-        wiseroutes = routes[routes.route_short_name.astype(str).str.lower().str.contains('counterclockwise')]
-        wiseroutes2 = routes[routes.route_short_name.astype(str).str.lower().str.contains('counter-clockwise')]
-        wiseroutes = pd.concat([wiseroutes, wiseroutes2])
-        
-        for ccw_idx, ccw_route in wiseroutes.iterrows():
-            shortname = ccw_route.route_short_name.lower().replace('counter-','').replace('counter','')
-            cw_idx = routes[routes.route_short_name.astype(str).str.lower().str.contains(shortname)].index
-            if len(cw_idx)==0: continue
-            if len(cw_idx)>1: raise Exception(f'multiple cw/ccw routes found for {shortname}')
-            oldroute_id, newroute_id = routes.loc[cw_idx[0],'route_id'], ccw_route.route_id
-            routes.loc[ccw_idx,'route_short_name'] = shortname.replace('clockwise','ccw_and_cw')
-            trips.loc[trips.route_id==oldroute_id, 'route_id'] = newroute_id
-            routes.drop(cw_idx, inplace=True)  # retain only the ccw version
+        for routecol in ['route_short_name','route_long_name']: # sometimes it's only in one
+            wiseroutes = routes[routes[routecol].astype(str).str.lower().str.contains('counter-?clockwise', regex=True)]
+            for ccw_idx, ccw_route in wiseroutes.iterrows():
+                rname = ccw_route[routecol].lower().replace('counter-','').replace('counter','')
+                cw_idx = routes[(routes[routecol].astype(str).str.lower().str.contains(rname, regex=False)) &
+                                (routes.agency_name==ccw_route.agency_name)].index
+                cw_idx = cw_idx.drop(ccw_idx, errors='ignore') # only if the route is just "clockwise"
+                if len(cw_idx)==0: continue
+                if len(cw_idx)>1: raise Exception(f'multiple cw/ccw routes found for {rname}')
+                oldroute_id, newroute_id = routes.loc[cw_idx[0],'route_id'], ccw_route.route_id
+                routes.loc[ccw_idx,routecol] = rname.replace('clockwise','ccw_and_cw')
+                trips.loc[trips.route_id==oldroute_id, 'route_id'] = newroute_id
+                routes.drop(cw_idx, inplace=True)  # retain only the ccw version
 
         # make ids unique across agencies
         routes['prefixed_route_id'] = prefix + "_" + routes['route_id'].astype(str)
@@ -582,11 +582,11 @@ def identify_paired_routes():
         wise_routes = routes[routes.route_name.str.lower().str.contains('wise')]
         letter_routes = routes[routes.route_short_name.astype(str).str.contains(r'[a-zA-Z]')]
 
-        cols = ['agency_name','route_short_name','route_long_name']
+        cols = ['agency_name','route_id','route_short_name','route_long_name']
         paired_routes = pd.concat([wise_routes,letter_routes])[cols].drop_duplicates().sort_values(by=cols)
         paired_routes['year'] = year
         output_dfs[year] = paired_routes.copy()
-    pd.concat(output_dfs.values()).to_csv(os.path.join(output_path, 'paired_routes.csv'))
+    pd.concat(output_dfs.values()).to_csv(os.path.join(output_path, 'paired_routes.csv'), index=False)
 
 if __name__ == "__main__":
     
